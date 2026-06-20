@@ -32,6 +32,8 @@ type loginModel struct {
 	err        error
 	client     *api.Client
 	cfg        *config.Config
+	width      int
+	height     int
 }
 
 func newLoginModel(client *api.Client, cfg *config.Config) loginModel {
@@ -61,6 +63,23 @@ func (m loginModel) Init() tea.Cmd {
 	return textinput.Blink
 }
 
+// resizeInputs adjusts text input widths based on terminal width.
+func (m *loginModel) resizeInputs() {
+	if m.width == 0 {
+		return
+	}
+	// Box: border(2) + padding(2) + margin(2) + label "Email:"(6) + prompt(2) = ~14
+	w := m.width - 20
+	if w < 10 {
+		w = 10
+	}
+	if w > 60 {
+		w = 60
+	}
+	m.emailInput.Width = w
+	m.passInput.Width = w
+}
+
 type providersMsg struct {
 	providers []pocketbook_cloud_client.Provider
 	err       error
@@ -76,6 +95,12 @@ type loginErrMsg struct{ err error }
 
 func (m loginModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.resizeInputs()
+		return m, nil
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "esc":
@@ -195,6 +220,15 @@ func (m loginModel) handleEnter() (tea.Model, tea.Cmd) {
 }
 
 func (m loginModel) View() string {
+	if m.width == 0 || m.height == 0 {
+		// Terminal size not yet known, render unstyled
+		return m.renderContent()
+	}
+	content := m.renderContent()
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+}
+
+func (m loginModel) renderContent() string {
 	var content string
 
 	switch m.state {

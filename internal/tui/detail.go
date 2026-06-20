@@ -23,6 +23,7 @@ type detailModel struct {
 	statusMsg     string
 	statusIsError bool
 	width         int
+	height        int
 }
 
 func newDetailModel(book pbc.Book, client *api.Client, cfg *config.Config) detailModel {
@@ -41,6 +42,8 @@ func (m detailModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -156,8 +159,25 @@ func (m detailModel) openBook() tea.Cmd {
 func (m detailModel) View() string {
 	b := m.book
 
-	// Title
-	title := TitleStyle.Render(b.Title)
+	// Title - truncate if too long
+	titleText := b.Title
+	if m.width > 0 {
+		maxTitle := m.width - 4
+		if maxTitle < 10 {
+			maxTitle = 10
+		}
+		titleText = truncate(titleText, maxTitle)
+	}
+	title := TitleStyle.Render(titleText)
+
+	// Calculate available width for metadata
+	metaWidth := 0
+	if m.width > 0 {
+		metaWidth = m.width - 8
+		if metaWidth < 30 {
+			metaWidth = 30
+		}
+	}
 
 	// Metadata fields
 	fields := []struct {
@@ -181,9 +201,18 @@ func (m detailModel) View() string {
 		if f.value == "" || f.value == "0" || f.value == "No" && (f.label == "DRM" || f.label == "LCP") {
 			continue
 		}
+		// Truncate long values to fit
+		val := f.value
+		if metaWidth > 0 {
+			maxVal := metaWidth - 14 // label(12) + ": "(2)
+			if maxVal < 5 {
+				maxVal = 5
+			}
+			val = truncate(val, maxVal)
+		}
 		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Left,
 			DetailLabelStyle.Width(12).Render(f.label+":"),
-			DetailValueStyle.Render(f.value),
+			DetailValueStyle.Render(val),
 		))
 	}
 
@@ -199,7 +228,14 @@ func (m detailModel) View() string {
 		))
 	}
 
-	metaBox := BoxStyle.Width(m.width - 8).Render(
+	boxW := 0
+	if m.width > 0 {
+		boxW = m.width - 8
+		if boxW < 30 {
+			boxW = 30
+		}
+	}
+	metaBox := BoxStyle.Width(boxW).Render(
 		lipgloss.JoinVertical(lipgloss.Left, rows...),
 	)
 
@@ -213,23 +249,34 @@ func (m detailModel) View() string {
 		status = statusStyle.Render(m.statusMsg)
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		title,
-		metaBox,
-		status,
-		HelpStyle.Render("r: read • d: download • esc/b: back • q: quit"),
-	)
+	help := HelpStyle.Render("r: read • d: download • esc/b: back • q: quit")
+
+	if m.width > 0 && m.height > 0 {
+		content := lipgloss.JoinVertical(lipgloss.Left, title, metaBox, status, help)
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, title, metaBox, status, help)
 }
 
 func (m detailModel) renderProgressBar() string {
-	width := 40
+	barWidth := 40
+	if m.width > 0 {
+		barWidth = m.width - 20 // account for box padding, margin, percentage text
+		if barWidth < 10 {
+			barWidth = 10
+		}
+		if barWidth > 60 {
+			barWidth = 60
+		}
+	}
 	percent := m.book.ReadPercent
 	if percent > 100 {
 		percent = 100
 	}
 
-	filled := width * percent / 100
-	empty := width - filled
+	filled := barWidth * percent / 100
+	empty := barWidth - filled
 
 	bar := ProgressBarStyle.Render(strings.Repeat("█", filled)) +
 		ProgressBarEmptyStyle.Render(strings.Repeat("░", empty))

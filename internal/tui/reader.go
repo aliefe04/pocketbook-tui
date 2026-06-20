@@ -180,6 +180,9 @@ func (m *readerModel) pageSize() int {
 	return ps
 }
 
+// minReaderWidth is the minimum terminal width for a usable reading experience.
+const minReaderWidth = 20
+
 func (m *readerModel) percent() int {
 	return reader.CalculatePercent(m.content, m.chapterIdx, m.lineOffset)
 }
@@ -208,6 +211,12 @@ func (m readerModel) View() string {
 		return "Loading..."
 	}
 
+	// Terminal too small
+	if m.width < minReaderWidth || m.height < 8 {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
+			ErrorStyle.Render("Terminal too small. Please resize to at least 20x8."))
+	}
+
 	if m.content == nil || len(m.content.Chapters) == 0 {
 		return lipgloss.JoinVertical(lipgloss.Left,
 			TitleStyle.Render("PocketBook Reader"),
@@ -228,11 +237,21 @@ func (m readerModel) View() string {
 
 	// Calculate exact available space
 	pageSize := m.pageSize()
-	
+	wrapWidth := m.width - 4
+	if wrapWidth < 10 {
+		wrapWidth = 10
+	}
+
 	// Header
 	percent := m.percent()
-	titlePart := lipgloss.NewStyle().Bold(true).Foreground(PrimaryColor).Render(fmt.Sprintf(">> %s", m.bookTitle))
 	percentPart := lipgloss.NewStyle().Foreground(DimColor).Render(fmt.Sprintf("%d%%", percent))
+	// Truncate title to leave room for percentage
+	maxTitleW := m.width - lipgloss.Width(percentPart) - 6
+	if maxTitleW < 5 {
+		maxTitleW = 5
+	}
+	titleText := truncate(m.bookTitle, maxTitleW)
+	titlePart := lipgloss.NewStyle().Bold(true).Foreground(PrimaryColor).Render(fmt.Sprintf(">> %s", titleText))
 	spacerWidth := m.width - lipgloss.Width(titlePart) - lipgloss.Width(percentPart) - 2
 	if spacerWidth < 0 {
 		spacerWidth = 0
@@ -248,7 +267,7 @@ func (m readerModel) View() string {
 	linesAdded := 0
 	for i := m.lineOffset; i < len(ch.Lines) && linesAdded < pageSize; i++ {
 		line := ch.Lines[i]
-		wrapped := reader.WrapLine(line, m.width-4)
+		wrapped := reader.WrapLine(line, wrapWidth)
 		for _, w := range wrapped {
 			if linesAdded >= pageSize {
 				break
@@ -275,12 +294,16 @@ func (m readerModel) View() string {
 		m.lineOffset, len(ch.Lines),
 		m.content.TotalLines())
 	if ch.Title != "" {
-		chapterInfo = fmt.Sprintf("%s • %s", ch.Title, chapterInfo)
+		chapterTitle := truncate(ch.Title, m.width-40)
+		chapterInfo = fmt.Sprintf("%s • %s", chapterTitle, chapterInfo)
 	}
 
-	footer := lipgloss.NewStyle().Foreground(DimColor).Render(
-		fmt.Sprintf("%s • ?:help • q:quit", chapterInfo),
-	)
+	footerText := fmt.Sprintf("%s • ?:help • q:quit", chapterInfo)
+	footerStyle := lipgloss.NewStyle().Foreground(DimColor)
+	if m.width > 0 {
+		footerStyle = footerStyle.MaxWidth(m.width)
+	}
+	footer := footerStyle.Render(footerText)
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		header,
@@ -311,11 +334,27 @@ func (m readerModel) helpView() string {
 		"",
 	}
 
+	helpW := m.width - 4
+	if helpW < 30 {
+		helpW = 30
+	}
+
+	helpContent := strings.Join(help, "\n")
+
+	if m.width > 0 && m.height > 0 {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
+			lipgloss.NewStyle().
+				Width(helpW).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(BorderColor).
+				Render(helpContent))
+	}
+
 	return lipgloss.NewStyle().
-		Width(m.width - 4).
+		Width(helpW).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(BorderColor).
-		Render(strings.Join(help, "\n"))
+		Render(helpContent)
 }
 
 // OpenBookMsg is sent to open a book in the reader.

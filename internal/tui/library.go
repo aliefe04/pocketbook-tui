@@ -237,7 +237,8 @@ func (m *libraryModel) cursorUp() {
 }
 
 func (m *libraryModel) adjustScroll() {
-	visibleItems := m.height - 6
+	// Each book takes 2 lines (title + desc); reserve 6 lines for header/footer
+	visibleItems := (m.height - 6) / 2
 	if visibleItems < 1 {
 		visibleItems = 1
 	}
@@ -334,23 +335,44 @@ func (m libraryModel) openBook(book pbc.Book) tea.Cmd {
 
 func (m libraryModel) View() string {
 	if m.loading && len(m.books) == 0 {
-		return lipgloss.JoinVertical(lipgloss.Left,
+		content := lipgloss.JoinVertical(lipgloss.Left,
 			TitleStyle.Render("PocketBook Cloud"),
 			BoxStyle.Render("Loading your library..."),
 		)
+		if m.width > 0 && m.height > 0 {
+			return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+		}
+		return content
 	}
 
 	if m.err != nil && len(m.books) == 0 {
-		return lipgloss.JoinVertical(lipgloss.Left,
+		errText := m.err.Error()
+		if m.width > 0 {
+			errText = truncate(errText, m.width-8)
+		}
+		content := lipgloss.JoinVertical(lipgloss.Left,
 			TitleStyle.Render("PocketBook Cloud"),
 			BoxStyle.Render(
 				lipgloss.JoinVertical(lipgloss.Left,
 					ErrorStyle.Render("Failed to load library"),
-					m.err.Error(),
+					errText,
 				),
 			),
 			HelpStyle.Render("R: retry • q: quit"),
 		)
+		if m.width > 0 && m.height > 0 {
+			return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+		}
+		return content
+	}
+
+	// Available width for list items (account for cursor "  " or "> " prefix)
+	listWidth := 80
+	if m.width > 0 {
+		listWidth = m.width - 4
+		if listWidth < 20 {
+			listWidth = 20
+		}
 	}
 
 	var lines []string
@@ -362,6 +384,11 @@ func (m libraryModel) View() string {
 
 	// Book list
 	visibleItems := m.height - 6
+	if visibleItems < 1 {
+		visibleItems = 1
+	}
+	// Each book takes 2 lines (title + desc), so halve visible items
+	visibleItems = visibleItems / 2
 	if visibleItems < 1 {
 		visibleItems = 1
 	}
@@ -392,9 +419,18 @@ func (m libraryModel) View() string {
 			icon = "♪ "
 		}
 
-		titleStr := fmt.Sprintf("%s%s", icon, title)
+		// Truncate title to fit terminal width
+		titleMax := listWidth - lipgloss.Width(icon)
+		if titleMax < 5 {
+			titleMax = 5
+		}
+		titleStr := fmt.Sprintf("%s%s", icon, truncate(title, titleMax))
+
+		// Truncate description to fit
 		descStr := fmt.Sprintf("    %s • %s • %d%% • %s",
-			author, strings.ToUpper(book.Format), book.ReadPercent, humanBytes(book.Bytes))
+			truncate(author, listWidth-20),
+			strings.ToUpper(book.Format), book.ReadPercent, humanBytes(book.Bytes))
+		descStr = truncate(descStr, listWidth)
 
 		if isSelected {
 			lines = append(lines,
@@ -415,11 +451,16 @@ func (m libraryModel) View() string {
 		statusStyle = ErrorStyle
 	}
 
+	helpText := fmt.Sprintf("%s • enter: details • r: read • d: download • /: filter • R: refresh • L: logout • q: quit",
+		statusStyle.Render(m.statusMsg))
+
+	helpStyle := HelpStyle
+	if m.width > 0 {
+		helpStyle = HelpStyle.MaxWidth(m.width)
+	}
+
 	lines = append(lines, "")
-	lines = append(lines, HelpStyle.Render(
-		fmt.Sprintf("%s • enter: details • r: read • d: download • /: filter • R: refresh • L: logout • q: quit",
-			statusStyle.Render(m.statusMsg)),
-	))
+	lines = append(lines, helpStyle.Render(helpText))
 
 	return strings.Join(lines, "\n")
 }
