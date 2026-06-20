@@ -235,81 +235,183 @@ func (m readerModel) View() string {
 		return "No content available"
 	}
 
-	// Calculate exact available space
-	pageSize := m.pageSize()
-	wrapWidth := m.width - 4
-	if wrapWidth < 10 {
-		wrapWidth = 10
+	W := m.width
+	H := m.height
+
+	// Reading column: cap at a comfortable width, center it.
+	contentW := W - 4
+	if contentW > 72 {
+		contentW = 72
+	}
+	if contentW < 10 {
+		contentW = 10
+	}
+	leftMargin := (W - contentW) / 2
+	if leftMargin < 0 {
+		leftMargin = 0
 	}
 
-	// Header
-	percent := m.percent()
-	percentPart := lipgloss.NewStyle().Foreground(DimColor).Render(fmt.Sprintf("%d%%", percent))
-	// Truncate title to leave room for percentage
-	maxTitleW := m.width - lipgloss.Width(percentPart) - 6
-	if maxTitleW < 5 {
-		maxTitleW = 5
+	// Body area = terminal minus header(1) + top rule(1) + bottom rule(1) + footer(1)
+	pageSize := H - 4
+	if pageSize < 5 {
+		pageSize = 5
 	}
-	titleText := truncate(m.bookTitle, maxTitleW)
-	titlePart := lipgloss.NewStyle().Bold(true).Foreground(PrimaryColor).Render(fmt.Sprintf(">> %s", titleText))
-	spacerWidth := m.width - lipgloss.Width(titlePart) - lipgloss.Width(percentPart) - 2
-	if spacerWidth < 0 {
-		spacerWidth = 0
+
+	// ── Header: book title (left) + percent (right), dim & calm ─────────────
+	percent := m.percent()
+	percentStr := fmt.Sprintf("%d%%", percent)
+	bookTitle := truncate(m.bookTitle, contentW)
+	headerLeft := lipgloss.NewStyle().Foreground(DimColor).Render(bookTitle)
+	headerRight := lipgloss.NewStyle().Foreground(DimColor).Render(percentStr)
+	spacerW := W - lipgloss.Width(headerLeft) - lipgloss.Width(headerRight)
+	if spacerW < 0 {
+		spacerW = 0
 	}
 	header := lipgloss.JoinHorizontal(lipgloss.Left,
-		titlePart,
-		lipgloss.NewStyle().Width(spacerWidth).Render(""),
-		percentPart,
+		headerLeft,
+		lipgloss.NewStyle().Width(spacerW).Render(""),
+		headerRight,
 	)
 
-	// Content area - fill entire screen
-	var visibleLines []string
-	linesAdded := 0
-	for i := m.lineOffset; i < len(ch.Lines) && linesAdded < pageSize; i++ {
-		line := ch.Lines[i]
-		wrapped := reader.WrapLine(line, wrapWidth)
-		for _, w := range wrapped {
-			if linesAdded >= pageSize {
+	// ── Body: centered reading column ───────────────────────────────────────
+	var pieces []string
+	added := 0
+
+	// Chapter heading, shown at the start of a chapter
+	if m.lineOffset == 0 && strings.TrimSpace(ch.Title) != "" {
+		titleLines := reader.WrapLine(ch.Title, contentW-4)
+		for _, tl := range titleLines {
+			if added >= pageSize {
 				break
 			}
-			visibleLines = append(visibleLines, w)
-			linesAdded++
+			pieces = append(pieces,
+				lipgloss.NewStyle().
+					Width(contentW).
+					Align(lipgloss.Center).
+					Bold(true).
+					Foreground(ChapterColor).
+					Render(tl))
+			added++
+		}
+		// Decorative rule under the title
+		ruleLen := len([]rune(strings.TrimSpace(ch.Title))) + 4
+		if ruleLen > contentW {
+			ruleLen = contentW
+		}
+		if added < pageSize {
+			pieces = append(pieces,
+				lipgloss.NewStyle().
+					Width(contentW).
+					Align(lipgloss.Center).
+					Foreground(ReadingDimColor).
+					Render(strings.Repeat("═", ruleLen)))
+			added++
+		}
+		if added < pageSize {
+			pieces = append(pieces, lipgloss.NewStyle().Width(contentW).Render(""))
+			added++
 		}
 	}
 
+	// Body text — warm parchment, paragraph breaks preserved & collapsed
+	prevBlank := false
+	emptyPage := true
+	for i := m.lineOffset; i < len(ch.Lines) && added < pageSize; i++ {
+		line := strings.TrimSpace(ch.Lines[i])
+		if line == "" {
+			if prevBlank {
+				continue // collapse consecutive blank lines
+			}
+			prevBlank = true
+			pieces = append(pieces, lipgloss.NewStyle().Width(contentW).Render(""))
+			added++
+			continue
+		}
+		prevBlank = false
+		emptyPage = false
+		wrapped := reader.WrapLine(line, contentW)
+		for _, w := range wrapped {
+			if added >= pageSize {
+				break
+			}
+			pieces = append(pieces,
+				lipgloss.NewStyle().
+					Width(contentW).
+					Foreground(ReadingColor).
+					Render(w))
+			added++
+		}
+	}
+
+	// End markers
+	if emptyPage && added > 0 && m.lineOffset >= len(ch.Lines)-1 {
+		isLast := m.chapterIdx >= len(m.content.Chapters)-1
+		label := "(end of chapter)"
+		if isLast {
+			label = "(end of book)"
+		}
+		// Replace last piece with centered end marker
+		pieces[len(pieces)-1] = lipgloss.NewStyle().
+			Width(contentW).
+			Align(lipgloss.Center).
+			Foreground(ReadingDimColor).
+			Render(label)
+	}
+
 	// Fill remaining space
-	for linesAdded < pageSize {
-		visibleLines = append(visibleLines, "")
-		linesAdded++
+	for added < pageSize {
+		pieces = append(pieces, lipgloss.NewStyle().Width(contentW).Render(""))
+		added++
 	}
 
-	content := strings.Join(visibleLines, "\n")
-	if strings.TrimSpace(content) == "" {
-		content = strings.Repeat("\n", pageSize-1) + "(End of chapter)"
-	}
+	body := lipgloss.JoinVertical(lipgloss.Left, pieces...)
+	body = lipgloss.NewStyle().MarginLeft(leftMargin).Render(body)
 
-	// Footer
-	chapterInfo := fmt.Sprintf("Ch %d/%d | Line %d/%d | Total %d",
-		m.chapterIdx+1, len(m.content.Chapters),
-		m.lineOffset, len(ch.Lines),
-		m.content.TotalLines())
-	if ch.Title != "" {
-		chapterTitle := truncate(ch.Title, m.width-40)
-		chapterInfo = fmt.Sprintf("%s • %s", chapterTitle, chapterInfo)
+	// ── Footer: chapter info (left) + help hint (right), dim ────────────────
+	chTitle := strings.TrimSpace(ch.Title)
+	maxChTitleW := contentW - 16
+	if maxChTitleW < 5 {
+		maxChTitleW = 5
 	}
+	if chTitle != "" {
+		chTitle = truncate(chTitle, maxChTitleW)
+	}
+	var leftInfo string
+	if chTitle != "" {
+		leftInfo = fmt.Sprintf("Ch %d/%d · %s", m.chapterIdx+1, len(m.content.Chapters), chTitle)
+	} else {
+		leftInfo = fmt.Sprintf("Ch %d/%d", m.chapterIdx+1, len(m.content.Chapters))
+	}
+	footLeft := lipgloss.NewStyle().Foreground(ReadingDimColor).Render(leftInfo)
+	footRightStr := "?:help · q:quit"
+	spacerF := W - lipgloss.Width(footLeft) - len([]rune(footRightStr))
+	// If no room for spacer, truncate the help hint
+	if spacerF < 0 {
+		avail := W - lipgloss.Width(footLeft) - 2
+		if avail < 0 {
+			avail = 0
+		}
+		footRightStr = truncate(footRightStr, avail)
+		spacerF = W - lipgloss.Width(footLeft) - len([]rune(footRightStr))
+		if spacerF < 0 {
+			spacerF = 0
+		}
+	}
+	footRight := lipgloss.NewStyle().Foreground(ReadingDimColor).Render(footRightStr)
+	footer := lipgloss.JoinHorizontal(lipgloss.Left,
+		footLeft,
+		lipgloss.NewStyle().Width(spacerF).Render(""),
+		footRight,
+	)
 
-	footerText := fmt.Sprintf("%s • ?:help • q:quit", chapterInfo)
-	footerStyle := lipgloss.NewStyle().Foreground(DimColor)
-	if m.width > 0 {
-		footerStyle = footerStyle.MaxWidth(m.width)
-	}
-	footer := footerStyle.Render(footerText)
+	// Thin sepia rules between chrome and body
+	rule := lipgloss.NewStyle().Foreground(ReadingDimColor).Render(strings.Repeat("─", W))
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		header,
-		lipgloss.NewStyle().Foreground(BorderColor).Render(strings.Repeat("─", m.width)),
-		content,
-		lipgloss.NewStyle().Foreground(BorderColor).Render(strings.Repeat("─", m.width)),
+		rule,
+		body,
+		rule,
 		footer,
 	)
 }

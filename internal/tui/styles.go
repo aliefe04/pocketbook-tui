@@ -13,6 +13,11 @@ var (
 	BgColor        = lipgloss.Color("#111827")
 	BorderColor    = lipgloss.Color("#374151")
 
+	// Reader-specific colors — warm paperback palette
+	ReadingColor    = lipgloss.Color("#D9C9A3") // warm parchment text
+	ReadingDimColor = lipgloss.Color("#7A6F5A") // muted sepia for rules
+	ChapterColor    = lipgloss.Color("#E8A838") // gold for chapter titles
+
 	// Styles
 	TitleStyle = lipgloss.NewStyle().
 			Bold(true).

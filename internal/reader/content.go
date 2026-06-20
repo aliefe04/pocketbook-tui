@@ -48,39 +48,46 @@ func (bc *BookContent) PositionToChapter(globalLine int) (chapterIdx int, lineIn
 	return 0, 0
 }
 
-// WrapLine breaks a long line into multiple lines of maxWidth.
+// WrapLine breaks a long line into multiple lines of maxWidth (rune-based,
+// Unicode-safe). Words are kept whole; breaks happen at the last space before
+// maxWidth. If no space is found, the line is force-broken at maxWidth.
 func WrapLine(line string, maxWidth int) []string {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return []string{""}
+	}
 	if maxWidth <= 0 {
 		return []string{line}
 	}
 
+	runes := []rune(line)
+	if len(runes) <= maxWidth {
+		return []string{string(runes)}
+	}
+
 	var lines []string
-	for len(line) > maxWidth {
+	for len(runes) > maxWidth {
 		idx := maxWidth
-		// Find last space before maxWidth
+		// Find last space at or before maxWidth
 		for i := maxWidth; i > 0; i-- {
-			if line[i] == ' ' {
+			if runes[i] == ' ' {
 				idx = i
 				break
 			}
 		}
-		
-		// If no space found, force break at maxWidth
-		if idx == 0 || idx == maxWidth && line[maxWidth] != ' ' {
+		// No space found — force break at maxWidth
+		if idx == 0 || (idx == maxWidth && runes[maxWidth] != ' ') {
 			idx = maxWidth
 		}
-		
-		lines = append(lines, line[:idx])
-		line = strings.TrimSpace(line[idx:])
-		
-		// Safety: prevent infinite loop
-		if len(line) > 0 && len(line) == len(lines[len(lines)-1]) {
-			lines = append(lines, line)
-			break
+		lines = append(lines, string(runes[:idx]))
+		runes = runes[idx:]
+		// Trim leading spaces on the remainder
+		for len(runes) > 0 && runes[0] == ' ' {
+			runes = runes[1:]
 		}
 	}
-	if line != "" {
-		lines = append(lines, line)
+	if len(runes) > 0 {
+		lines = append(lines, string(runes))
 	}
 	return lines
 }
