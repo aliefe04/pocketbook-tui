@@ -71,19 +71,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.height = msg.Height
 		var cmds []tea.Cmd
 		if a.login != nil {
-			_, cmd := a.login.Update(msg)
+			updated, cmd := a.login.Update(msg)
+			a.login = updated
 			cmds = append(cmds, cmd)
 		}
 		if a.library != nil {
-			_, cmd := a.library.Update(msg)
+			updated, cmd := a.library.Update(msg)
+			a.library = updated
 			cmds = append(cmds, cmd)
 		}
 		if a.detail != nil {
-			_, cmd := a.detail.Update(msg)
+			updated, cmd := a.detail.Update(msg)
+			a.detail = updated
 			cmds = append(cmds, cmd)
 		}
 		if a.reader != nil {
-			_, cmd := a.reader.Update(msg)
+			updated, cmd := a.reader.Update(msg)
+			a.reader = updated
 			cmds = append(cmds, cmd)
 		}
 		return a, tea.Batch(cmds...)
