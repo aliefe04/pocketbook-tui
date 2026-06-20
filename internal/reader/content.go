@@ -8,42 +8,69 @@ type Chapter struct {
 	Lines []string
 }
 
+// titleHeight is the number of virtual lines a chapter title occupies when
+// rendered: title line, decorative rule, and a blank separator. Only present
+// when the chapter has a non-empty title.
+const titleHeight = 3
+
+// TitleHeight returns the number of virtual lines the title chrome occupies
+// (title + rule + blank) when the chapter has a non-empty title, else 0.
+// This is constant — independent of terminal width — so lineOffset mapping
+// stays stable across resizes. Titles are truncated to a single line in the
+// reader view to keep this guarantee.
+func (c Chapter) TitleHeight() int {
+	if strings.TrimSpace(c.Title) == "" {
+		return 0
+	}
+	return titleHeight
+}
+
+// RenderedLineCount returns the total number of virtual lines the chapter
+// occupies in the reader's virtual flow: title chrome (if any) + body lines.
+func (c Chapter) RenderedLineCount() int {
+	return c.TitleHeight() + len(c.Lines)
+}
+
 // BookContent holds all chapters of a parsed book.
 type BookContent struct {
 	Chapters []Chapter
 }
 
-// TotalLines returns the total number of lines across all chapters.
+// TotalLines returns the total number of virtual lines across all chapters,
+// including title chrome.
 func (bc *BookContent) TotalLines() int {
 	total := 0
 	for _, ch := range bc.Chapters {
-		total += len(ch.Lines)
+		total += ch.RenderedLineCount()
 	}
 	return total
 }
 
-// ChapterStartLine returns the global line index where a chapter starts.
+// ChapterStartLine returns the virtual line index where a chapter starts
+// (i.e. its title line, or first body line if untitled).
 func (bc *BookContent) ChapterStartLine(chapterIdx int) int {
 	start := 0
 	for i := 0; i < chapterIdx; i++ {
-		start += len(bc.Chapters[i].Lines)
+		start += bc.Chapters[i].RenderedLineCount()
 	}
 	return start
 }
 
-// PositionToChapter converts a global line position to chapter and line within chapter.
+// PositionToChapter converts a global virtual line position to chapter index
+// and line within that chapter.
 func (bc *BookContent) PositionToChapter(globalLine int) (chapterIdx int, lineInChapter int) {
 	current := 0
 	for i, ch := range bc.Chapters {
-		if globalLine < current+len(ch.Lines) {
+		rendered := ch.RenderedLineCount()
+		if globalLine < current+rendered {
 			return i, globalLine - current
 		}
-		current += len(ch.Lines)
+		current += rendered
 	}
 	// Fallback to last position
 	if len(bc.Chapters) > 0 {
 		lastIdx := len(bc.Chapters) - 1
-		return lastIdx, len(bc.Chapters[lastIdx].Lines) - 1
+		return lastIdx, bc.Chapters[lastIdx].RenderedLineCount() - 1
 	}
 	return 0, 0
 }

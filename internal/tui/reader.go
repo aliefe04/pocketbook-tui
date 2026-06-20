@@ -33,15 +33,46 @@ func newReaderModel(content *reader.BookContent, bookHash, bookTitle string, pos
 		ready:     width > 0 && height > 0,
 	}
 
-	if pos != nil && pos.ChapterIndex < len(content.Chapters) {
-		m.chapterIdx = pos.ChapterIndex
-		m.lineOffset = pos.LineOffset
-	} else {
-		m.chapterIdx = 0
-		m.lineOffset = 0
+	if pos != nil {
+		// Apply legacy v0 -> v1 migration if needed (shifts lineOffset by
+		// the chapter's title height so it still points at the same body line).
+		pos.ApplyMigration(content)
+		if pos.ChapterIndex < len(content.Chapters) {
+			m.chapterIdx = pos.ChapterIndex
+			m.lineOffset = pos.LineOffset
+		}
 	}
 
+	// Clamp lineOffset into the chapter's virtual flow.
+	m.clampLineOffset()
+
 	return m
+}
+
+// chapterVirtualCount returns the number of virtual lines in the current
+// chapter (title chrome + body).
+func (m *readerModel) chapterVirtualCount() int {
+	ch := m.currentChapter()
+	if ch == nil {
+		return 0
+	}
+	return ch.RenderedLineCount()
+}
+
+// clampLineOffset keeps lineOffset within [0, chapterVirtualCount-1].
+// Used after navigation and after migration.
+func (m *readerModel) clampLineOffset() {
+	count := m.chapterVirtualCount()
+	if count == 0 {
+		m.lineOffset = 0
+		return
+	}
+	if m.lineOffset < 0 {
+		m.lineOffset = 0
+	}
+	if m.lineOffset >= count {
+		m.lineOffset = count - 1
+	}
 }
 
 func (m readerModel) Init() tea.Cmd {
@@ -104,13 +135,24 @@ func (m *readerModel) scrollDown(lines int) {
 		return
 	}
 
+	count := ch.RenderedLineCount()
 	m.lineOffset += lines
-	if m.lineOffset >= len(ch.Lines) {
+	if m.lineOffset >= count {
 		if m.chapterIdx < len(m.content.Chapters)-1 {
+			// Carry the overflow into the next chapter.
+			overflow := m.lineOffset - count
 			m.chapterIdx++
-			m.lineOffset = 0
+			next := m.currentChapter()
+			if next != nil {
+				m.lineOffset = overflow
+				if m.lineOffset >= next.RenderedLineCount() {
+					m.lineOffset = next.RenderedLineCount() - 1
+				}
+			} else {
+				m.lineOffset = 0
+			}
 		} else {
-			m.lineOffset = len(ch.Lines) - 1
+			m.lineOffset = count - 1
 		}
 	}
 }
@@ -119,13 +161,17 @@ func (m *readerModel) scrollUp(lines int) {
 	m.lineOffset -= lines
 	if m.lineOffset < 0 {
 		if m.chapterIdx > 0 {
+			overflow := -m.lineOffset
 			m.chapterIdx--
-			ch := m.currentChapter()
-			if ch != nil {
-				m.lineOffset = len(ch.Lines) - 1
+			prev := m.currentChapter()
+			if prev != nil {
+				pc := prev.RenderedLineCount()
+				m.lineOffset = pc - overflow
 				if m.lineOffset < 0 {
 					m.lineOffset = 0
 				}
+			} else {
+				m.lineOffset = 0
 			}
 		} else {
 			m.lineOffset = 0
@@ -152,12 +198,14 @@ func (m *readerModel) goToChapterStart() {
 }
 
 func (m *readerModel) goToChapterEnd() {
-	ch := m.currentChapter()
-	if ch != nil {
-		m.lineOffset = len(ch.Lines) - m.pageSize()
-		if m.lineOffset < 0 {
-			m.lineOffset = 0
-		}
+	count := m.chapterVirtualCount()
+	if count == 0 {
+		m.lineOffset = 0
+		return
+	}
+	m.lineOffset = count - m.pageSize()
+	if m.lineOffset < 0 {
+		m.lineOffset = 0
 	}
 }
 
@@ -172,7 +220,9 @@ func (m *readerModel) pageSize() int {
 	if !m.ready || m.height == 0 {
 		return 20 // Default until we know terminal size
 	}
-	// Reserve: header(1) + border(1) + content(N) + border(1) + footer(1) = 4 lines
+	// header(1) + top rule(1) + bottom rule(1) + footer(1) = 4 chrome lines.
+	// Body area holds the rest. Chapter title chrome lives inside the virtual
+	// flow, so no special casing is needed here.
 	ps := m.height - 4
 	if ps < 5 {
 		ps = 5
@@ -273,58 +323,73 @@ func (m readerModel) View() string {
 		headerRight,
 	)
 
-	// ── Body: centered reading column ───────────────────────────────────────
+	// ── Body: virtual flow render ───────────────────────────────────────────
+	// The virtual flow is: [title chrome (titleHeight lines)] [body lines].
+	// lineOffset indexes this flow. We render `pageSize` lines starting at
+	// lineOffset, mixing title chrome and body lines as needed.
+	titleH := ch.TitleHeight()
+	bodyCount := len(ch.Lines)
+	virtualCount := titleH + bodyCount
+
 	var pieces []string
 	added := 0
+	emit := func(s string) {
+		if added >= pageSize {
+			return
+		}
+		pieces = append(pieces, s)
+		added++
+	}
 
-	// Chapter heading, shown at the start of a chapter
-	if m.lineOffset == 0 && strings.TrimSpace(ch.Title) != "" {
-		titleLines := reader.WrapLine(ch.Title, contentW-4)
-		for _, tl := range titleLines {
-			if added >= pageSize {
-				break
-			}
-			pieces = append(pieces,
-				lipgloss.NewStyle().
-					Width(contentW).
-					Align(lipgloss.Center).
-					Bold(true).
-					Foreground(ChapterColor).
-					Render(tl))
-			added++
+	// Title chrome — shown when the viewport overlaps the title region.
+	if titleH > 0 {
+		// Title line
+		if m.lineOffset <= 0 {
+			titleText := truncate(strings.TrimSpace(ch.Title), contentW-4)
+			emit(lipgloss.NewStyle().
+				Width(contentW).
+				Align(lipgloss.Center).
+				Bold(true).
+				Foreground(ChapterColor).
+				Render(titleText))
+		} else {
+			// Skip past this virtual line
 		}
+
 		// Decorative rule under the title
-		ruleLen := len([]rune(strings.TrimSpace(ch.Title))) + 4
-		if ruleLen > contentW {
-			ruleLen = contentW
+		if m.lineOffset <= 1 && added < pageSize {
+			runeCount := len([]rune(strings.TrimSpace(ch.Title))) + 4
+			if runeCount > contentW {
+				runeCount = contentW
+			}
+			emit(lipgloss.NewStyle().
+				Width(contentW).
+				Align(lipgloss.Center).
+				Foreground(ReadingDimColor).
+				Render(strings.Repeat("═", runeCount)))
 		}
-		if added < pageSize {
-			pieces = append(pieces,
-				lipgloss.NewStyle().
-					Width(contentW).
-					Align(lipgloss.Center).
-					Foreground(ReadingDimColor).
-					Render(strings.Repeat("═", ruleLen)))
-			added++
-		}
-		if added < pageSize {
-			pieces = append(pieces, lipgloss.NewStyle().Width(contentW).Render(""))
-			added++
+
+		// Blank separator
+		if m.lineOffset <= 2 && added < pageSize {
+			emit(lipgloss.NewStyle().Width(contentW).Render(""))
 		}
 	}
 
-	// Body text — warm parchment, paragraph breaks preserved & collapsed
+	// Body lines — start at max(0, lineOffset - titleH) in body index.
+	bodyStart := m.lineOffset - titleH
+	if bodyStart < 0 {
+		bodyStart = 0
+	}
 	prevBlank := false
-	emptyPage := true
-	for i := m.lineOffset; i < len(ch.Lines) && added < pageSize; i++ {
+	emptyPage := titleH == 0 // if title shows, page isn't "empty"
+	for i := bodyStart; i < bodyCount && added < pageSize; i++ {
 		line := strings.TrimSpace(ch.Lines[i])
 		if line == "" {
 			if prevBlank {
-				continue // collapse consecutive blank lines
+				continue
 			}
 			prevBlank = true
-			pieces = append(pieces, lipgloss.NewStyle().Width(contentW).Render(""))
-			added++
+			emit(lipgloss.NewStyle().Width(contentW).Render(""))
 			continue
 		}
 		prevBlank = false
@@ -334,23 +399,20 @@ func (m readerModel) View() string {
 			if added >= pageSize {
 				break
 			}
-			pieces = append(pieces,
-				lipgloss.NewStyle().
-					Width(contentW).
-					Foreground(ReadingColor).
-					Render(w))
-			added++
+			emit(lipgloss.NewStyle().
+				Width(contentW).
+				Foreground(ReadingColor).
+				Render(w))
 		}
 	}
 
 	// End markers
-	if emptyPage && added > 0 && m.lineOffset >= len(ch.Lines)-1 {
+	if emptyPage && added > 0 && bodyStart >= bodyCount-1 {
 		isLast := m.chapterIdx >= len(m.content.Chapters)-1
 		label := "(end of chapter)"
 		if isLast {
 			label = "(end of book)"
 		}
-		// Replace last piece with centered end marker
 		pieces[len(pieces)-1] = lipgloss.NewStyle().
 			Width(contentW).
 			Align(lipgloss.Center).
@@ -366,6 +428,8 @@ func (m readerModel) View() string {
 
 	body := lipgloss.JoinVertical(lipgloss.Left, pieces...)
 	body = lipgloss.NewStyle().MarginLeft(leftMargin).Render(body)
+
+	_ = virtualCount // currently only used implicitly via added/bodyStart
 
 	// ── Footer: chapter info (left) + help hint (right), dim ────────────────
 	chTitle := strings.TrimSpace(ch.Title)
