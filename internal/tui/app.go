@@ -103,9 +103,28 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case OpenBookMsg:
+		if msg.Err != nil {
+			// If download failed due to 401, re-login
+			if isUnauthorized(msg.Err) {
+				a.cfg.ClearAuth()
+				a.cfg.Save()
+				a.screen = screenLogin
+				a.login = newLoginModel(a.client, a.cfg)
+				return a, a.login.Init()
+			}
+			a.screen = screenLibrary
+			return a, nil
+		}
 		a.screen = screenReader
 		a.reader = newReaderModel(msg.Content, msg.BookHash, msg.BookTitle, msg.Position, a.width, a.height)
 		return a, a.reader.Init()
+
+	case UnauthorizedMsg:
+		a.cfg.ClearAuth()
+		a.cfg.Save()
+		a.screen = screenLogin
+		a.login = newLoginModel(a.client, a.cfg)
+		return a, a.login.Init()
 	}
 
 	var cmd tea.Cmd

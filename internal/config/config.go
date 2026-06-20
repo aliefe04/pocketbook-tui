@@ -66,3 +66,9 @@ func (c *Config) Save() error {
 func (c *Config) IsLoggedIn() bool {
 	return c.Token != ""
 }
+
+// ClearAuth removes stored tokens, forcing re-login.
+func (c *Config) ClearAuth() {
+	c.Token = ""
+	c.RefreshToken = ""
+}

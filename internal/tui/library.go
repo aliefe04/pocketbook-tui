@@ -86,6 +86,13 @@ func (m libraryModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = ""
 			return m, m.loadBooks()
 
+		case "L":
+			m.cfg.ClearAuth()
+			m.cfg.Save()
+			return m, func() tea.Msg {
+				return UnauthorizedMsg{}
+			}
+
 		case "j", "down":
 			m.cursorDown()
 		case "k", "up":
@@ -120,6 +127,14 @@ func (m libraryModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		if msg.err != nil {
 			m.err = msg.err
+			// Check for 401 Unauthorized - token expired
+			if isUnauthorized(msg.err) {
+				m.cfg.ClearAuth()
+				m.cfg.Save()
+				return m, func() tea.Msg {
+					return UnauthorizedMsg{}
+				}
+			}
 			m.statusMsg = fmt.Sprintf("Error: %v", msg.err)
 			m.statusIsError = true
 			return m, nil
@@ -402,7 +417,7 @@ func (m libraryModel) View() string {
 
 	lines = append(lines, "")
 	lines = append(lines, HelpStyle.Render(
-		fmt.Sprintf("%s • enter: details • r: read • d: download • /: filter • R: refresh • q: quit",
+		fmt.Sprintf("%s • enter: details • r: read • d: download • /: filter • R: refresh • L: logout • q: quit",
 			statusStyle.Render(m.statusMsg)),
 	))
 
@@ -412,6 +427,13 @@ func (m libraryModel) View() string {
 // ShowDetailMsg is sent when a book is selected.
 type ShowDetailMsg struct {
 	Book pbc.Book
+}
+
+// UnauthorizedMsg is sent when a 401 is received, triggering re-login.
+type UnauthorizedMsg struct{}
+
+func isUnauthorized(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "401")
 }
 
 func humanBytes(b int) string {
