@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"image"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -19,6 +20,14 @@ type readerModel struct {
 	chapterIdx, lineOffset                   int
 	withinLineOffset                         int // Source byte offset, independent of terminal width.
 	withinLinePart                           int
+	startWithinPart                          int
+	showImage                                bool
+	imageSelection, imagePan, imagePanX      int
+	imageZoom                                float64
+	imageCache                               []string
+	imageCacheWidth, imageCacheHeight        int
+	imageDecoded                             image.Image
+	imageDecodedAt                           imageAddress
 	prefs                                    config.Preferences
 	layout                                   *readerLayout
 	pageMode                                 bool
@@ -26,6 +35,7 @@ type readerModel struct {
 	ready                                    bool
 	statusMsg                                string
 	statusIsError, showHelp                  bool
+	helpScroll                               int
 	cloud                                    *cloudLink
 	phase                                    syncPhase
 	conflict                                 *nativeProgress
@@ -53,6 +63,9 @@ func newReaderModel(content *reader.BookContent, bookHash, bookTitle string, pos
 	}
 	m.clampLineOffset()
 	m.ensureLayout()
+	if m.lineOffset == 0 {
+		m.goToChapterStart()
+	}
 	return m
 }
 
@@ -85,7 +98,7 @@ func (m readerModel) contentWidth() int {
 }
 func (m *readerModel) ensureLayout() {
 	w := m.contentWidth()
-	options := flowOptions{lineGap: m.prefs.LineSpacing, paragraphGap: m.prefs.ParagraphSpacing, justify: m.prefs.Alignment == "justify"}
+	options := flowOptions{lineGap: m.prefs.LineSpacing, paragraphGap: m.prefs.ParagraphSpacing, justify: m.prefs.Alignment == "justify", imageMode: m.prefs.ImageMode, imageHeight: m.prefs.ImageHeight, theme: m.prefs.Theme}
 	if m.layout == nil || m.layout.content != m.content || m.layout.width != w || m.layout.options != options {
 		m.layout = buildReaderLayout(m.content, w, options)
 	}
@@ -136,27 +149,29 @@ func (m *readerModel) pageUp() {
 	n := m.textCapacity()
 	m.moveRows(-max(n-min(m.prefs.PageOverlap, n-1), 1))
 }
-func (m *readerModel) nextChapter() {
-	if m.content != nil && m.chapterIdx < len(m.content.Chapters)-1 {
-		m.chapterIdx++
-		m.lineOffset, m.withinLineOffset = 0, 0
-		m.withinLinePart = 0
+func (m *readerModel) jumpChapter(direction int) {
+	m.ensureLayout()
+	if m.content == nil {
+		return
+	}
+	for chapter := m.chapterIdx + direction; chapter >= 0 && chapter < len(m.content.Chapters); chapter += direction {
+		index := m.layout.chapterStart(chapter)
+		if index < len(m.layout.rows) && m.layout.rows[index].chapter == chapter {
+			m.setRow(index)
+			return
+		}
 	}
 }
-func (m *readerModel) prevChapter() {
-	if m.chapterIdx > 0 {
-		m.chapterIdx--
-		m.lineOffset, m.withinLineOffset = 0, 0
-		m.withinLinePart = 0
-	}
-}
+func (m *readerModel) nextChapter() { m.jumpChapter(1) }
+func (m *readerModel) prevChapter() { m.jumpChapter(-1) }
 func (m *readerModel) goToChapterStart() {
-	m.lineOffset, m.withinLineOffset, m.withinLinePart = 0, 0, 0
+	m.ensureLayout()
+	m.setRow(m.layout.chapterStart(m.chapterIdx))
 }
 func (m *readerModel) goToChapterEnd() {
 	m.ensureLayout()
 	end := m.layout.index(m.chapterIdx, m.chapterVirtualCount(), 0, 0)
-	start := m.layout.index(m.chapterIdx, 0, 0, 0)
+	start := m.layout.chapterStart(m.chapterIdx)
 	m.setRow(max(start, end-m.textCapacity()+1))
 }
 func (m *readerModel) percent() int {
@@ -171,6 +186,9 @@ func (m readerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height, m.ready = msg.Width, msg.Height, true
 		m.ensureLayout()
+		if m.showImage {
+			m.ensureImageCache()
+		}
 	case syncResultMsg:
 		return m.onSync(msg)
 	case cloudReloadMsg:
@@ -179,6 +197,24 @@ func (m readerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onRefresh(msg)
 	case tea.MouseMsg:
 		if m.prefs.Mouse && m.phase != phaseSyncing {
+			if m.showHelp {
+				if msg.Button == tea.MouseButtonWheelDown {
+					m.helpScroll++
+				}
+				if msg.Button == tea.MouseButtonWheelUp {
+					m.helpScroll = max(m.helpScroll-1, 0)
+				}
+				return m, nil
+			}
+			if m.showImage {
+				if msg.Button == tea.MouseButtonWheelDown {
+					return m.handleImageKey("down")
+				}
+				if msg.Button == tea.MouseButtonWheelUp {
+					return m.handleImageKey("up")
+				}
+				return m, nil
+			}
 			if msg.Button == tea.MouseButtonWheelDown {
 				if m.pageMode {
 					m.pageDown()
@@ -199,6 +235,27 @@ func (m readerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.phase == phaseSyncing && key != "ctrl+c" {
 			return m, nil
 		}
+		if m.showImage {
+			return m.handleImageKey(key)
+		}
+		if m.showHelp {
+			switch key {
+			case "q", "esc", "?":
+				m.showHelp = false
+			case "down", "j":
+				m.helpScroll++
+			case "up", "k":
+				m.helpScroll = max(m.helpScroll-1, 0)
+			case "pgdown", " ":
+				m.helpScroll += max(m.height-2, 1)
+			case "pgup":
+				m.helpScroll = max(m.helpScroll-max(m.height-2, 1), 0)
+			case "ctrl+c":
+				m.invalidate()
+				return m, tea.Quit
+			}
+			return m, nil
+		}
 		if next, cmd, ok := m.promptKey(key); ok {
 			return next, cmd
 		}
@@ -215,6 +272,10 @@ func (m readerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case nav.LineUp:
 			m.scrollUp(1)
+			return m, nil
+		}
+		if key == "I" {
+			m.openImage()
 			return m, nil
 		}
 		switch key {
@@ -259,6 +320,9 @@ func (m readerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m readerModel) View() string {
+	if m.showImage && !tooSmall(m.width, m.height) {
+		return m.imageView()
+	}
 	if m.showHelp {
 		return m.helpView()
 	}
@@ -287,7 +351,7 @@ func (m readerModel) View() string {
 				style = readDim.Align(lipgloss.Center)
 			}
 		}
-		body = append(body, style.Width(column).Render(r.text))
+		body = append(body, style.Width(column).Render(m.layout.rowText(r)))
 	}
 	for len(body) < rows {
 		body = append(body, strings.Repeat(" ", column))
@@ -344,8 +408,8 @@ func (m readerModel) View() string {
 
 func (m readerModel) helpView() string {
 	w, h := termSize(m.width, m.height)
-	inner := max(w-4, 1)
-	lines := []string{"READER CONTROLS"}
+	inner := max(w-2, 1)
+	var lines []string
 	if m.note != nil && m.note.help != "" {
 		lines = append(lines, wrapText(m.note.help, inner)...)
 	}
@@ -353,16 +417,18 @@ func (m readerModel) helpView() string {
 		fmt.Sprintf("%s/%s  one displayed row", m.prefs.NavigationKeys.LineDown, m.prefs.NavigationKeys.LineUp),
 		fmt.Sprintf("%s/%s  next / previous page", m.prefs.NavigationKeys.NextPage, m.prefs.NavigationKeys.PrevPage),
 		"↓/↑   follow page/scroll mode", "←/→ PgUp/PgDn  previous / next page",
-		"P     toggle page/scroll mode", "S     persistent settings",
+		"P  toggle page/scroll mode", "S  persistent settings", "I  photo viewer",
 		"n/p g/G  chapter next/previous, start/end", "?  toggle help",
 		"C  check Cloud or review a changed position", "q/esc  save, sync, return",
 		"o c l enter  conflict: overwrite, load, local, read",
 		"r l enter  failed: retry, local, read", "ctrl+c  quit without saving")
-	for i, line := range lines {
-		lines[i] = truncate(line, inner)
+	var wrapped []string
+	for _, line := range lines {
+		wrapped = append(wrapped, wrapText(line, inner)...)
 	}
-	box := lipgloss.NewStyle().Foreground(colorText).Border(lipgloss.RoundedBorder()).BorderForeground(colorFaint).Padding(0, 1).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, clipRows(box, h))
+	capacity := max(h-2, 1)
+	start := min(max(m.helpScroll, 0), max(len(wrapped)-capacity, 0))
+	return frame(w, h, []string{titleRow(w, "Reader help", "")}, wrapped[start:min(start+capacity, len(wrapped))], []string{truncate("↑↓ scroll · ?:back", w)})
 }
 
 func (m *readerModel) progressText() string {

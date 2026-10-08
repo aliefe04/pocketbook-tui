@@ -16,6 +16,8 @@ func applyTheme(p config.Preferences) {
 	colorFaint = lipgloss.AdaptiveColor{Light: "#C3BAA8", Dark: "#4B463E"}
 	colorSelection = lipgloss.AdaptiveColor{Light: "#EFE2C4", Dark: "#34302A"}
 	colorBackground = lipgloss.AdaptiveColor{Light: "#FAF8F2", Dark: "#171A20"}
+	colorSuccess = lipgloss.AdaptiveColor{Light: "#2D6A46", Dark: "#86C79F"}
+	colorError = lipgloss.AdaptiveColor{Light: "#A3281C", Dark: "#F09A8E"}
 	switch p.Theme {
 	case "dark":
 		colorText = fixedColor("#E6E8ED")
@@ -42,8 +44,12 @@ func applyTheme(p config.Preferences) {
 	colorAccent = accents[p.Accent]
 	if p.Theme == "dark" {
 		colorAccent = fixedColor(colorAccent.Dark)
+		colorSuccess = fixedColor(colorSuccess.Dark)
+		colorError = fixedColor(colorError.Dark)
 	} else if p.Theme != "auto" {
 		colorAccent = fixedColor(colorAccent.Light)
+		colorSuccess = fixedColor(colorSuccess.Light)
+		colorError = fixedColor(colorError.Light)
 	}
 	colorReadText, colorReadDim = colorText, colorMuted
 	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)

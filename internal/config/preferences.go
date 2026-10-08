@@ -28,6 +28,8 @@ type Preferences struct {
 	Progress         string         `json:"progress"`
 	PageOverlap      int            `json:"page_overlap"`
 	Mouse            bool           `json:"mouse"`
+	ImageMode        string         `json:"image_mode"`
+	ImageHeight      int            `json:"image_height"`
 	NavigationKeys   NavigationKeys `json:"navigation_keys"`
 	LibrarySort      string         `json:"library_sort"`
 	CompactLibrary   bool           `json:"compact_library"`
@@ -54,7 +56,8 @@ var (
 	Alignments    = []string{"left", "justify"}
 	ProgressModes = []string{"percent", "pages", "both", "none"}
 	LibrarySorts  = []string{"recent", "title", "author"}
-	ReservedKeys  = []string{"q", "esc", "ctrl+c", "C", "?", "S", "P", "n", "p", "g", "G", "o", "c", "l", "r", "enter", "pgup", "pgdown", "up", "down", "left", "right", "d", "u"}
+	ImageModes    = []string{"color", "grayscale", "captions", "hidden"}
+	ReservedKeys  = []string{"q", "esc", "ctrl+c", "C", "?", "S", "P", "I", "n", "p", "g", "G", "o", "c", "l", "r", "enter", "pgup", "pgdown", "up", "down", "left", "right", "d", "u"}
 )
 
 const defaultKeyName = "space"
@@ -85,6 +88,8 @@ func DefaultPreferences() Preferences {
 		LineSpacing:      0,
 		ParagraphSpacing: 0,
 		Alignment:        "left",
+		ImageMode:        "color",
+		ImageHeight:      12,
 		ShowHeader:       true,
 		ShowFooter:       true,
 		Progress:         "percent",
@@ -142,6 +147,12 @@ func (p Preferences) Validate() error {
 	}
 	if !slices.Contains(ReadingModes, p.ReadingMode) {
 		return fmt.Errorf("reading_mode must be one of %s", strings.Join(ReadingModes, ", "))
+	}
+	if !slices.Contains(ImageModes, p.ImageMode) {
+		return fmt.Errorf("image_mode must be color, grayscale, captions or hidden")
+	}
+	if err := inRange("image_height", p.ImageHeight, 4, 30); err != nil {
+		return err
 	}
 	if p.ReadingWidth != 0 && (p.ReadingWidth < ReadingWidthMin || p.ReadingWidth > ReadingWidthMax) {
 		return fmt.Errorf("reading_width must be 0 (auto) or %d to %d", ReadingWidthMin, ReadingWidthMax)

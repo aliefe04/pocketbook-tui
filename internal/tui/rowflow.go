@@ -16,18 +16,25 @@ type visualRow struct {
 	chapter, line, offset int
 	part                  int
 	title                 bool
+	photo                 bool
+	imageIndex            int
+	imageRow              int
 }
 
 type flowOptions struct {
 	lineGap, paragraphGap int
 	justify               bool
+	imageMode, theme      string
+	imageHeight           int
 }
 
 type readerLayout struct {
-	content *reader.BookContent
-	width   int
-	options flowOptions
-	rows    []visualRow
+	content   *reader.BookContent
+	width     int
+	options   flowOptions
+	rows      []visualRow
+	addresses []imageAddress
+	photos    map[imageAddress][]string
 }
 
 func cleanBookText(s string) string {
@@ -103,6 +110,9 @@ func buildReaderLayout(content *reader.BookContent, width int, options flowOptio
 		return l
 	}
 	for ci, ch := range content.Chapters {
+		for index := range ch.Images {
+			l.addresses = append(l.addresses, imageAddress{ci, index})
+		}
 		if ch.TitleHeight() > 0 {
 			title := truncate(cleanBookText(strings.TrimSpace(ch.Title)), max(width-4, 1))
 			l.rows = append(l.rows, visualRow{text: title, chapter: ci, line: 0, title: true},
@@ -110,6 +120,7 @@ func buildReaderLayout(content *reader.BookContent, width int, options flowOptio
 				visualRow{chapter: ci, line: 2, title: true})
 		}
 		for li, text := range ch.Lines {
+			l.addImages(ch, ci, ch.TitleHeight()+li, false, 0)
 			wrapped := wrapSource(text, width)
 			for wi, row := range wrapped {
 				row.chapter, row.line = ci, ch.TitleHeight()+li
@@ -128,9 +139,59 @@ func buildReaderLayout(content *reader.BookContent, width int, options flowOptio
 					l.rows = append(l.rows, visualRow{chapter: ci, line: row.line, offset: row.offset, part: part})
 				}
 			}
+			l.addImages(ch, ci, ch.TitleHeight()+li, true, len(strings.TrimSpace(cleanBookText(text))))
 		}
 	}
 	return l
+}
+
+func (l *readerLayout) addImages(ch reader.Chapter, chapter, line int, after bool, offset int) {
+	for index, photo := range ch.Images {
+		if photo.LineOffset != line || photo.After != after {
+			continue
+		}
+		rows := photoFlowRows(photo, l.width, l.options.imageHeight, l.options.imageMode)
+		base := -(len(ch.Images)+1)*100 + index*100
+		if after {
+			base = 1000 + index*100
+		}
+		for i, text := range rows {
+			l.rows = append(l.rows, visualRow{text: text, chapter: chapter, line: line, offset: offset, part: base + i, photo: true, imageIndex: index, imageRow: i})
+		}
+	}
+}
+
+func (l *readerLayout) rowText(row visualRow) string {
+	if !row.photo {
+		return row.text
+	}
+	address := imageAddress{row.chapter, row.imageIndex}
+	if l.photos == nil {
+		l.photos = make(map[imageAddress][]string)
+	}
+	rows, ok := l.photos[address]
+	if !ok {
+		photo := l.content.Chapters[address.chapter].Images[address.index]
+		actual := imageRows(photo, l.width, l.options.imageHeight, l.options.imageMode, l.options.theme)
+		count := len(photoFlowRows(photo, l.width, l.options.imageHeight, l.options.imageMode))
+		if len(actual) == count {
+			rows = actual
+		} else {
+			rows = make([]string, count)
+			if count > 0 && len(actual) > 0 {
+				copy(rows[:count-1], actual[:len(actual)-1])
+				rows[count-1] = actual[len(actual)-1]
+			}
+		}
+		if len(l.photos) >= 8 {
+			clear(l.photos)
+		}
+		l.photos[address] = rows
+	}
+	if row.imageRow < len(rows) {
+		return rows[row.imageRow]
+	}
+	return row.text
 }
 
 func (l *readerLayout) index(chapter, line, offset, part int) int {
@@ -141,7 +202,16 @@ func (l *readerLayout) index(chapter, line, offset, part int) int {
 		r := l.rows[i]
 		return r.chapter > chapter || (r.chapter == chapter && (r.line > line || (r.line == line && (r.offset > offset || (r.offset == offset && r.part > part)))))
 	})
+	if part < 0 && i < len(l.rows) && l.rows[i].chapter == chapter && l.rows[i].line == line && l.rows[i].offset == offset {
+		if i == 0 || l.rows[i-1].chapter != chapter || l.rows[i-1].line != line {
+			return i
+		}
+	}
 	return max(i-1, 0)
+}
+
+func (l *readerLayout) chapterStart(chapter int) int {
+	return sort.Search(len(l.rows), func(i int) bool { return l.rows[i].chapter >= chapter })
 }
 
 func justifyRow(text string, width int) string {

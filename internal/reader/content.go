@@ -4,8 +4,9 @@ import "strings"
 
 // Chapter represents a single chapter of a book.
 type Chapter struct {
-	Title string
-	Lines []string
+	Title  string
+	Lines  []string
+	Images []EmbeddedImage
 	// anchors gives the EPUB source of each body line. It is nil for books
 	// without an EPUB source, and for documents whose markup could not be
 	// matched to their text exactly.

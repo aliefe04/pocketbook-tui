@@ -53,6 +53,7 @@ func (m *readerModel) attach(link *cloudLink, start *resumePoint) {
 	m.startChapter = m.chapterIdx
 	m.startLine = m.lineOffset
 	m.startWithinLine = m.withinLineOffset
+	m.startWithinPart = m.withinLinePart
 	fromCloud := start != nil && start.source == sourceCloud
 	m.startApprox = fromCloud && start.approx
 	m.startExact = fromCloud && !start.approx
@@ -71,13 +72,21 @@ func (m *readerModel) saveLocal() bool {
 // target returns the EPUB pointer and percentage for the current place. ok is
 // false when the place has no exact EPUB location.
 func (m readerModel) target() (cloudTarget, bool) {
+	m.ensureLayout()
+	if len(m.layout.rows) > 0 {
+		row := m.layout.rows[m.rowIndex()]
+		if row.photo {
+			pointer := m.content.Chapters[row.chapter].Images[row.imageIndex].Pointer
+			return cloudTarget{pointer: pointer, percent: m.percent()}, pointer != ""
+		}
+	}
 	pointer, ok := m.content.PointerAt(m.chapterIdx, m.lineOffset)
 	return cloudTarget{pointer: pointer, percent: m.percent()}, ok
 }
 
 // unmoved reports whether the reader is still at the place the session opened at.
 func (m readerModel) unmoved() bool {
-	return m.chapterIdx == m.startChapter && m.lineOffset == m.startLine && m.withinLineOffset == m.startWithinLine
+	return m.chapterIdx == m.startChapter && m.lineOffset == m.startLine && m.withinLineOffset == m.startWithinLine && m.withinLinePart == m.startWithinPart
 }
 
 // reqID returns the identity of the session's current request.
@@ -282,11 +291,15 @@ func (m readerModel) onReload(msg cloudReloadMsg) (tea.Model, tea.Cmd) {
 	m.withinLineOffset = 0
 	m.withinLinePart = 0
 	m.ensureLayout()
+	if !approx && msg.bm.IsImage {
+		m.locateImage(msg.bm.Chapter, msg.bm.ImageIndex)
+	}
 	link := *m.cloud
 	link.baseline = msg.cloud
 	m.cloud = &link
 	m.startChapter, m.startLine, m.startApprox = m.chapterIdx, m.lineOffset, approx
 	m.startWithinLine = m.withinLineOffset
+	m.startWithinPart = m.withinLinePart
 	m.startExact = !approx
 
 	if !m.saveLocal() {

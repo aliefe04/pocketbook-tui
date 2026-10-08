@@ -22,8 +22,10 @@ func ParseEPUB(data []byte) (*BookContent, error) {
 
 // Bookmark is an EPUB location resolved to the reader's virtual lines.
 type Bookmark struct {
-	Chapter    int   // index into BookContent.Chapters
-	LineOffset int   // virtual line within the chapter, title chrome included
+	Chapter    int // index into BookContent.Chapters
+	LineOffset int // virtual line within the chapter, title chrome included
+	ImageIndex int
+	IsImage    bool
 	Err        error // why the pointer could not be resolved; nil when it was
 }
 
@@ -79,6 +81,7 @@ func parseEPUB(data []byte, ptr *epubPointer) (*BookContent, Bookmark, error) {
 	// skipped item does not shift the pointer.
 	opfDir := filepath.Dir(opfPath)
 	var chapters []Chapter
+	images := newEPUBImages(zr)
 	for _, item := range opf.spine {
 		href, ok := opf.manifest[item.idref]
 		if !ok {
@@ -104,16 +107,23 @@ func parseEPUB(data []byte, ptr *epubPointer) (*BookContent, Bookmark, error) {
 			continue // skip problematic chapters
 		}
 		ch := Chapter{Title: xc.title, Lines: xc.lines, anchors: xc.anchors}
+		if len(ch.Lines) == 0 && len(xc.images) > 0 {
+			ch.Lines = []string{""}
+		}
+		ch.Images = images.chapter(xc.images, contentPath, ch.TitleHeight(), len(ch.Lines))
 		if opf.spineStep != 6 {
 			// Pointers are written and read as /6/…, so a package with its spine
 			// elsewhere has no exact location to write.
 			ch.anchors = nil
+			for i := range ch.Images {
+				ch.Images[i].Pointer = ""
+			}
 		}
 		if located {
 			if xc.locateErr != nil {
 				bm = Bookmark{Chapter: len(chapters), Err: xc.locateErr}
 			} else {
-				bm = Bookmark{Chapter: len(chapters), LineOffset: ch.TitleHeight() + xc.line}
+				bm = Bookmark{Chapter: len(chapters), LineOffset: ch.TitleHeight() + xc.line, ImageIndex: xc.imageIndex, IsImage: xc.isImage}
 			}
 		}
 		chapters = append(chapters, ch)

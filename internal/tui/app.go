@@ -47,7 +47,7 @@ func NewApp() (*App, error) {
 	// lipgloss otherwise queries the terminal background lazily, in the middle
 	// of rendering. Asking now, before Bubble Tea takes over the terminal,
 	// keeps the adaptive colors deterministic.
-	lipgloss.HasDarkBackground()
+	terminalDarkBackground = lipgloss.HasDarkBackground()
 
 	client := api.New()
 
@@ -248,6 +248,12 @@ func newReaderSession(msg OpenBookMsg, chosen *resumePoint, width, height int) r
 		pos = chosen.position(msg.BookHash)
 	}
 	r := newReaderModel(msg.Content, msg.BookHash, msg.BookTitle, pos, width, height)
+	if chosen != nil && chosen.isImage {
+		r.locateImage(chosen.chapter, chosen.imageIndex)
+	}
+	if chosen != nil && chosen.source == sourceCloud && !chosen.isImage {
+		r.withinLinePart = 0
+	}
 	r.attach(msg.Sync, chosen)
 	if text, isErr := resumeNotice(msg, chosen); text != "" {
 		r.setStatus(text, isErr)

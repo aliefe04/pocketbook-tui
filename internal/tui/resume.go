@@ -31,6 +31,8 @@ type resumePoint struct {
 	percent    int
 	approx     bool
 	when       time.Time
+	isImage    bool
+	imageIndex int
 }
 
 // sameSpot reports whether two points start the reader on the same line.
@@ -110,6 +112,8 @@ func cloudBookmark(native nativeProgress, ok bool, content *reader.BookContent, 
 			lineOffset: bm.LineOffset,
 			percent:    native.percent,
 			when:       native.updated,
+			isImage:    bm.IsImage,
+			imageIndex: bm.ImageIndex,
 		}, nil
 	}
 

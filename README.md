@@ -108,8 +108,11 @@ When Cloud and local positions differ, the TUI shows both sources and their save
 | `n` / `p` | Next / previous chapter |
 | `g` / `G` | Start / end of the chapter |
 | `?` | Show or hide the control list |
+| `↑` / `↓`, `PgUp` / `PgDn` inside help | Scroll the complete controls and Cloud status without moving the book |
+| `q` / `esc` inside help | Return to reading without saving |
 | `C` | Check Cloud again, or review a changed Cloud position |
 | `S` | Open settings from the reader, library, or book details |
+| `I` | View an embedded photo without changing the reading position |
 | `q` / `esc` | Save locally and sync supported EPUB positions. Return after Cloud confirms |
 | `ctrl+c` | Quit without saving the position |
 
@@ -139,6 +142,7 @@ Use `↑`/`↓` to select a setting, `←`/`→` to change it, and `tab` to reac
 | Appearance | Auto, dark, light, or sepia theme. Blue, green, amber, purple, or rose accent |
 | Reading | Page or scroll mode. Reading width, side margins, top/bottom margins, line spacing, paragraph spacing, left alignment or justification |
 | Reading information | Header and footer visibility. Percentage, terminal page count, both, or neither. Page overlap |
+| Images | Color, grayscale, captions only, or hidden. Inline image height from 4 to 30 rows |
 | Controls | Mouse wheel. Separate custom keys for next page, previous page, line down, and line up |
 | Library | Recent reading, title, or author order. Compact one-row entries |
 | Cloud | Automatic checks on opening. Sync on exit. Request timeout from 5 to 120 seconds |
@@ -160,21 +164,40 @@ Change font family and font size in your terminal application.
 
 - **Formats:** The reader supports EPUB and TXT only. It rejects other formats.
 - **DRM:** The reader rejects books marked DRM or LCP.
-- **Reader output:** The reader wraps chapter text to the terminal. It does not reproduce images, fonts, or the device's page layout.
+- **Reader output:** The reader displays text and embedded PNG, JPEG, and GIF photos. It does not reproduce fonts or the device's page layout.
 - **Page turns:** Page movement follows displayed rows, including wrapped paragraphs and chapter boundaries. It does not skip the rest of a long paragraph.
 - **Resizing:** The current source passage stays visible when the terminal width changes.
-- **Saved positions:** Local and Cloud positions resume at the containing paragraph, not a terminal-specific page boundary.
-- **Cloud bookmarks:** The reader resolves supported EPUB location markers, called CFI, to the containing paragraph. It does not restore a device's exact page layout.
+- **Saved positions:** Local positions identify paragraphs or text boundaries. Cloud positions can identify a paragraph or an image, not a terminal-specific page boundary.
+- **Cloud bookmarks:** The reader resolves supported EPUB location markers, called CFI, to their paragraph or image. It does not restore a device's exact page layout.
 - **Approximate resume:** If a bookmark cannot be resolved, the reader estimates the position from the Cloud percentage. It labels this estimate.
 - **Reading percentages:** The terminal percentage counts text lines, so it can differ from the Cloud percentage. The resume notice shows the saved Cloud percentage.
 - **Local positions:** The reader saves locally before any Cloud write. TXT positions remain local-only.
 - **Unmapped passages:** If the reader cannot map a passage to an exact EPUB location, it saves locally and shows a warning.
 - **Earlier positions:** The reader converts older local positions when you open their books. It saves the current format when you leave the reader.
 
+
+### Embedded photos
+
+Photos use colored Unicode half-block cells, so they do not require a terminal-specific graphics extension.
+Each cell displays an upper and a lower pixel.
+Use a Unicode and color-capable terminal, or choose captions-only mode.
+
+Press `I` to open the photo viewer. Press `n`/`p` to change photos, `+`/`-` to zoom, and arrow keys to pan.
+Press `0` to fit the photo again. Press `esc`, `q`, or `I` to return to reading without saving or syncing.
+The viewer also works when inline photos are hidden.
+
+The reader accepts embedded PNG, JPEG, and GIF resources. GIF display uses the first frame.
+It does not fetch remote images or render SVG vectors.
+Color and grayscale modes explain unavailable images while keeping following text readable.
+
+Image resources have limits of 8 MiB each, 32 MiB combined, and 8 million decoded pixels per image.
+The reader reports images above these limits instead of allocating their full decoded size.
+Cloud bookmarks can name an image exactly. Existing local positions still identify a paragraph or text boundary.
+
 ## Cloud synchronization
 
 Opening a cached EPUB shows the last known Cloud bookmark or local save without waiting for the network.
-The reader checks Cloud in the background, with a 30-second deadline for each request.
+The reader checks Cloud in the background, with a default 30-second request deadline. Change this deadline in settings.
 Different cached Cloud and local positions produce a choice, with Cloud selected first.
 
 If Cloud times out, reading stays available. Press `C` to retry.
@@ -237,7 +260,7 @@ Cached files use the server's file name. When the server gives no name, the file
 ## Limitations
 
 - Native EPUB Cloud saves are implemented. Physical Verse and iOS interoperability still needs device verification.
-- The reader does not support all PocketBook formats. It renders text only.
+- The reader does not support all PocketBook formats. Terminal-cell photos have lower detail than native graphics.
 
 ## How it works
 

@@ -28,11 +28,13 @@ const (
 // XML tree, which is what EPUB CFI steps count. Comments, processing
 // instructions and the doctype are left out, because CFI does not count them.
 type srcNode struct {
-	kind srcKind
-	name string // lower-case local name of an element
-	id   string // id attribute of an element
-	text string // character data of a text node
-	kids []*srcNode
+	kind       srcKind
+	name       string // lower-case local name of an element
+	id         string // id attribute of an element
+	text       string // character data of a text node
+	src, alt   string
+	imageSteps []cfiStep
+	kids       []*srcNode
 }
 
 // fromHTML copies the part of an HTML parse tree that the reader uses.
@@ -94,6 +96,12 @@ func parseXHTML(data []byte) (*srcNode, error) {
 			for _, a := range t.Attr {
 				if a.Name.Space == "" && a.Name.Local == "id" {
 					n.id = a.Value
+				}
+				if a.Name.Local == "src" || a.Name.Local == "href" {
+					n.src = a.Value
+				}
+				if a.Name.Local == "alt" || a.Name.Local == "title" {
+					n.alt = a.Value
 				}
 			}
 			parent.kids = append(parent.kids, n)
@@ -320,11 +328,14 @@ func (bc *BookContent) PointerAt(chapterIdx, lineOffset int) (string, bool) {
 
 // xhtmlChapter is one content document read for the reader.
 type xhtmlChapter struct {
-	lines     []string
-	title     string
-	anchors   *anchorTable // nil when the XML tree gives different lines
-	line      int          // body line that the pointer names, or -1
-	locateErr error        // why the pointer did not resolve
+	lines      []string
+	title      string
+	anchors    *anchorTable // nil when the XML tree gives different lines
+	line       int          // body line that the pointer names, or -1
+	locateErr  error        // why the pointer did not resolve
+	images     []imageReference
+	imageIndex int
+	isImage    bool
 }
 
 // readXHTML reads one content document. steps is the content path of a pointer
@@ -354,9 +365,13 @@ func readXHTML(data []byte, steps []cfiStep, itemref int) xhtmlChapter {
 	if steps != nil {
 		target, resolveErr = resolveEPUBTarget(root, steps)
 	}
-	var watch map[*srcNode]bool
+	watch := make(map[*srcNode]bool)
+	nodes := imageNodes(root)
+	for _, node := range nodes {
+		watch[node] = true
+	}
 	if target != nil {
-		watch = map[*srcNode]bool{target: true}
+		watch[target] = true
 	}
 	walked := walkLines(root, watch, true)
 	if !slices.Equal(walked.lines, res.lines) {
@@ -366,6 +381,14 @@ func readXHTML(data []byte, steps []cfiStep, itemref int) xhtmlChapter {
 		return res
 	}
 	res.anchors = &anchorTable{itemref: itemref, steps: walked.flat, ends: walked.ends}
+	for _, node := range nodes {
+		if node == target {
+			res.isImage = true
+			res.imageIndex = len(res.images)
+		}
+		pointer := (&anchorTable{itemref: itemref, steps: node.imageSteps, ends: []int{len(node.imageSteps)}}).pointer(0)
+		res.images = append(res.images, imageReference{source: node.src, alt: node.alt, line: walked.at[node], pointer: pointer})
+	}
 
 	switch {
 	case steps == nil:
@@ -376,10 +399,10 @@ func readXHTML(data []byte, steps []cfiStep, itemref int) xhtmlChapter {
 		switch {
 		case !ok:
 			res.locateErr = errors.New("pointer names content outside the readable text")
-		case len(res.lines) == 0:
+		case len(res.lines) == 0 && !res.isImage:
 			res.locateErr = errors.New("spine item has no readable text")
 		default:
-			res.line = min(pos, len(res.lines)-1)
+			res.line = min(pos, max(len(res.lines)-1, 0))
 		}
 	}
 	return res

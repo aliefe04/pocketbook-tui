@@ -33,6 +33,8 @@ var settingsOptions = []settingOption{
 	{category: "Reading", label: "Footer", field: "ShowFooter", boolean: true},
 	{category: "Reading", label: "Progress", field: "Progress", choices: config.ProgressModes, description: "Page numbers refer to this terminal layout, not device pages."},
 	{category: "Reading", label: "Page overlap", field: "PageOverlap", maximum: 3, step: 1, description: "Repeat this many displayed rows on the next page."},
+	{category: "Images", label: "Photo display", field: "ImageMode", choices: config.ImageModes, description: "Portable color or grayscale blocks, captions only, or hidden. I opens the image viewer."},
+	{category: "Images", label: "Inline height", field: "ImageHeight", minimum: 4, maximum: 30, step: 2, description: "Maximum image rows in the reading flow. The viewer fits your terminal."},
 	{category: "Controls", label: "Mouse wheel", field: "Mouse", boolean: true, description: "Wheel follows page/scroll mode. Disable to keep terminal selection."},
 	{category: "Controls", label: "Next page key", field: "NextPage", key: true},
 	{category: "Controls", label: "Previous page key", field: "PrevPage", key: true},
@@ -76,6 +78,10 @@ func settingValue(p *config.Preferences, field string) string {
 		return strconv.Itoa(p.PageOverlap)
 	case "Mouse":
 		return strconv.FormatBool(p.Mouse)
+	case "ImageMode":
+		return p.ImageMode
+	case "ImageHeight":
+		return strconv.Itoa(p.ImageHeight)
 	case "LibrarySort":
 		return p.LibrarySort
 	case "CompactLibrary":
@@ -129,6 +135,10 @@ func setSettingValue(p *config.Preferences, field, value string) {
 		p.PageOverlap = n
 	case "Mouse":
 		p.Mouse = b
+	case "ImageMode":
+		p.ImageMode = value
+	case "ImageHeight":
+		p.ImageHeight = n
 	case "LibrarySort":
 		p.LibrarySort = value
 	case "CompactLibrary":
@@ -317,11 +327,31 @@ func (a *App) applyPreferences(p config.Preferences) {
 	}
 }
 func (m *readerModel) applyPreferences(p config.Preferences) {
+	var photo *imageAddress
+	oldPart := m.withinLinePart
+	if m.layout != nil && len(m.layout.rows) > 0 {
+		row := m.layout.rows[m.rowIndex()]
+		if row.photo {
+			address := imageAddress{row.chapter, row.imageIndex}
+			photo = &address
+		}
+	}
 	m.prefs = p
 	m.pageMode = p.ReadingMode == "page"
 	m.cloudTimeout = time.Duration(p.CloudTimeoutSecs) * time.Second
 	m.withinLinePart = 0
 	m.ensureLayout()
+	if photo != nil {
+		if p.ImageMode == "hidden" {
+			m.withinLinePart = oldPart
+		} else {
+			m.locateImage(photo.chapter, photo.index)
+		}
+	}
+	m.imageCache = nil
+	if m.showImage {
+		m.ensureImageCache()
+	}
 	if !p.CloudSync && m.phase != phaseSyncing {
 		m.phase = phaseIdle
 		m.conflict = nil

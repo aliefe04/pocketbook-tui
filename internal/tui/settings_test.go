@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/aliefe/pocketbook-tui/internal/config"
@@ -172,4 +173,34 @@ func TestLibrarySortAndCompactDensityKeepSelectedBook(t *testing.T) {
 	}
 	assertFits(t, m.View(), 40, 8)
 	assertContains(t, m.View(), "Beta")
+}
+
+func TestHelpScrollsAllControlsWithoutMovingBook(t *testing.T) {
+	m := numberedReader()
+	m.pageDown()
+	before := m.position()
+	sourceOffset := m.withinLineOffset
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 20, Height: 8})
+	m = next.(readerModel)
+	next, _ = m.Update(runeKey("?"))
+	m = next.(readerModel)
+	foundPhoto, foundExit := false, false
+	for range 80 {
+		view := m.View()
+		assertFits(t, view, 20, 8)
+		for _, row := range plainRows(view) {
+			foundPhoto = foundPhoto || strings.HasPrefix(strings.TrimSpace(row), "I ")
+			foundExit = foundExit || strings.HasPrefix(strings.TrimSpace(row), "ctrl+c ")
+		}
+		next, _ = m.Update(downKey)
+		m = next.(readerModel)
+	}
+	if !foundPhoto || !foundExit {
+		t.Fatal("short-terminal help hid reader controls")
+	}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(readerModel)
+	if cmd != nil || m.showHelp || m.chapterIdx != before.ChapterIndex || m.lineOffset != before.LineOffset || m.withinLineOffset != sourceOffset {
+		t.Fatal("reading help moved or saved the book position")
+	}
 }
