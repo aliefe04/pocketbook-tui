@@ -100,10 +100,11 @@ When Cloud and local positions differ, the TUI shows both sources and their save
 
 | Key | Action |
 |-----|--------|
-| `j` / `k`, `↑` / `↓` | Scroll one line |
-| `d` / `u`, `PgDn` / `PgUp` | Scroll one page |
-| `f` / `space` | Next page |
-| `b` | Previous page |
+| `j` / `k` | Scroll one displayed row |
+| `↑` / `↓` | Turn a page in page mode, or scroll one row in scroll mode |
+| `d` / `u`, `PgDn` / `PgUp`, `→` / `←` | Next / previous page |
+| `f` / `space`, `b` | Next / previous page |
+| `P` | Switch between page and scroll modes |
 | `n` / `p` | Next / previous chapter |
 | `g` / `G` | Start / end of the chapter |
 | `?` | Show or hide the control list |
@@ -131,6 +132,9 @@ Small terminals show compact choices. The `↵` symbol means `enter`.
 - **Formats:** The reader supports EPUB and TXT only. It rejects other formats.
 - **DRM:** The reader rejects books marked DRM or LCP.
 - **Reader output:** The reader wraps chapter text to the terminal. It does not reproduce images, fonts, or the device's page layout.
+- **Page turns:** Page movement follows displayed rows, including wrapped paragraphs and chapter boundaries. It does not skip the rest of a long paragraph.
+- **Resizing:** The current source passage stays visible when the terminal width changes.
+- **Saved positions:** Local and Cloud positions resume at the containing paragraph, not a terminal-specific page boundary.
 - **Cloud bookmarks:** The reader resolves supported EPUB location markers, called CFI, to the containing paragraph. It does not restore a device's exact page layout.
 - **Approximate resume:** If a bookmark cannot be resolved, the reader estimates the position from the Cloud percentage. It labels this estimate.
 - **Reading percentages:** The terminal percentage counts text lines, so it can differ from the Cloud percentage. The resume notice shows the saved Cloud percentage.

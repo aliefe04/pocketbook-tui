@@ -52,6 +52,7 @@ func (m *readerModel) attach(link *cloudLink, start *resumePoint) {
 	m.cloud = link
 	m.startChapter = m.chapterIdx
 	m.startLine = m.lineOffset
+	m.startWithinLine = m.withinLineOffset
 	fromCloud := start != nil && start.source == sourceCloud
 	m.startApprox = fromCloud && start.approx
 	m.startExact = fromCloud && !start.approx
@@ -76,7 +77,7 @@ func (m readerModel) target() (cloudTarget, bool) {
 
 // unmoved reports whether the reader is still at the place the session opened at.
 func (m readerModel) unmoved() bool {
-	return m.chapterIdx == m.startChapter && m.lineOffset == m.startLine
+	return m.chapterIdx == m.startChapter && m.lineOffset == m.startLine && m.withinLineOffset == m.startWithinLine
 }
 
 // reqID returns the identity of the session's current request.
@@ -275,10 +276,13 @@ func (m readerModel) onReload(msg cloudReloadMsg) (tea.Model, tea.Cmd) {
 		m.chapterIdx, m.lineOffset = msg.bm.Chapter, msg.bm.LineOffset
 	}
 	m.clampLineOffset()
+	m.withinLineOffset = 0
+	m.ensureLayout()
 	link := *m.cloud
 	link.baseline = msg.cloud
 	m.cloud = &link
 	m.startChapter, m.startLine, m.startApprox = m.chapterIdx, m.lineOffset, approx
+	m.startWithinLine = m.withinLineOffset
 	m.startExact = !approx
 
 	if !m.saveLocal() {
