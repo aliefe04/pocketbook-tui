@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/aliefe/pocketbook-tui/internal/config"
 	"github.com/aliefe/pocketbook-tui/internal/reader"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -17,6 +18,8 @@ type readerModel struct {
 	bookHash, bookTitle                      string
 	chapterIdx, lineOffset                   int
 	withinLineOffset                         int // Source byte offset, independent of terminal width.
+	withinLinePart                           int
+	prefs                                    config.Preferences
 	layout                                   *readerLayout
 	pageMode                                 bool
 	width, height                            int
@@ -41,6 +44,7 @@ var readerSessions atomic.Uint64
 
 func newReaderModel(content *reader.BookContent, bookHash, bookTitle string, pos *reader.Position, width, height int) readerModel {
 	m := readerModel{content: content, bookHash: bookHash, bookTitle: cleanBookText(bookTitle), pageMode: true, width: width, height: height, ready: width > 0 && height > 0, session: readerSessions.Add(1), cloudTimeout: defaultCloudTimeout}
+	m.prefs = config.DefaultPreferences()
 	if pos != nil && content != nil {
 		pos.ApplyMigration(content)
 		if pos.ChapterIndex >= 0 && pos.ChapterIndex < len(content.Chapters) {
@@ -71,17 +75,24 @@ func (m readerModel) Init() tea.Cmd                      { return nil }
 func (m *readerModel) setStatus(text string, isErr bool) { m.statusMsg, m.statusIsError = text, isErr }
 func (m readerModel) contentWidth() int {
 	w, _ := termSize(m.width, m.height)
-	return min(max(w-4, 1), 72)
+	margin := min(m.prefs.HorizontalMargin, max((w-16)/2, 0))
+	available := max(w-2*margin, 1)
+	width := m.prefs.ReadingWidth
+	if width == 0 {
+		width = 72
+	}
+	return min(width, available)
 }
 func (m *readerModel) ensureLayout() {
 	w := m.contentWidth()
-	if m.layout == nil || m.layout.content != m.content || m.layout.width != w {
-		m.layout = buildReaderLayout(m.content, w)
+	options := flowOptions{lineGap: m.prefs.LineSpacing, paragraphGap: m.prefs.ParagraphSpacing, justify: m.prefs.Alignment == "justify"}
+	if m.layout == nil || m.layout.content != m.content || m.layout.width != w || m.layout.options != options {
+		m.layout = buildReaderLayout(m.content, w, options)
 	}
 }
 func (m *readerModel) rowIndex() int {
 	m.ensureLayout()
-	return m.layout.index(m.chapterIdx, m.lineOffset, m.withinLineOffset)
+	return m.layout.index(m.chapterIdx, m.lineOffset, m.withinLineOffset, m.withinLinePart)
 }
 func (m *readerModel) setRow(index int) {
 	m.ensureLayout()
@@ -90,38 +101,62 @@ func (m *readerModel) setRow(index int) {
 	}
 	r := m.layout.rows[min(max(index, 0), len(m.layout.rows)-1)]
 	m.chapterIdx, m.lineOffset, m.withinLineOffset = r.chapter, r.line, r.offset
+	m.withinLinePart = r.part
 }
 func (m *readerModel) moveRows(delta int)  { m.setRow(m.rowIndex() + delta) }
 func (m *readerModel) scrollDown(rows int) { m.moveRows(max(rows, 0)) }
 func (m *readerModel) scrollUp(rows int)   { m.moveRows(-max(rows, 0)) }
-func (m *readerModel) pageSize() int       { _, h := termSize(m.width, m.height); return max(h-4, 1) }
+func (m *readerModel) bodyRows() int {
+	_, h := termSize(m.width, m.height)
+	chrome := 0
+	if m.prefs.ShowHeader {
+		chrome += 2
+	}
+	if m.prefs.ShowFooter {
+		chrome += 2
+	}
+	return max(h-chrome, 1)
+}
+func (m *readerModel) verticalPadding() int {
+	rows := m.bodyRows()
+	prompt := len(m.promptRows(m.contentWidth(), rows))
+	return min(m.prefs.VerticalMargin, max((rows-prompt-1)/2, 0))
+}
+func (m *readerModel) pageSize() int { return max(m.bodyRows()-2*m.verticalPadding(), 1) }
 func (m *readerModel) textCapacity() int {
 	return max(m.pageSize()-len(m.promptRows(m.contentWidth(), m.pageSize())), 1)
 }
 func (m *readerModel) pageDown() {
 	i, n := m.rowIndex(), m.textCapacity()
 	if i+n < len(m.layout.rows) {
-		m.setRow(i + n)
+		m.setRow(i + max(n-min(m.prefs.PageOverlap, n-1), 1))
 	}
 }
-func (m *readerModel) pageUp() { m.moveRows(-m.textCapacity()) }
+func (m *readerModel) pageUp() {
+	n := m.textCapacity()
+	m.moveRows(-max(n-min(m.prefs.PageOverlap, n-1), 1))
+}
 func (m *readerModel) nextChapter() {
 	if m.content != nil && m.chapterIdx < len(m.content.Chapters)-1 {
 		m.chapterIdx++
 		m.lineOffset, m.withinLineOffset = 0, 0
+		m.withinLinePart = 0
 	}
 }
 func (m *readerModel) prevChapter() {
 	if m.chapterIdx > 0 {
 		m.chapterIdx--
 		m.lineOffset, m.withinLineOffset = 0, 0
+		m.withinLinePart = 0
 	}
 }
-func (m *readerModel) goToChapterStart() { m.lineOffset, m.withinLineOffset = 0, 0 }
+func (m *readerModel) goToChapterStart() {
+	m.lineOffset, m.withinLineOffset, m.withinLinePart = 0, 0, 0
+}
 func (m *readerModel) goToChapterEnd() {
 	m.ensureLayout()
-	end := m.layout.index(m.chapterIdx, m.chapterVirtualCount(), 0)
-	start := m.layout.index(m.chapterIdx, 0, 0)
+	end := m.layout.index(m.chapterIdx, m.chapterVirtualCount(), 0, 0)
+	start := m.layout.index(m.chapterIdx, 0, 0, 0)
 	m.setRow(max(start, end-m.textCapacity()+1))
 }
 func (m *readerModel) percent() int {
@@ -142,6 +177,23 @@ func (m readerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onReload(msg)
 	case refreshMsg:
 		return m.onRefresh(msg)
+	case tea.MouseMsg:
+		if m.prefs.Mouse && m.phase != phaseSyncing {
+			if msg.Button == tea.MouseButtonWheelDown {
+				if m.pageMode {
+					m.pageDown()
+				} else {
+					m.scrollDown(1)
+				}
+			}
+			if msg.Button == tea.MouseButtonWheelUp {
+				if m.pageMode {
+					m.pageUp()
+				} else {
+					m.scrollUp(1)
+				}
+			}
+		}
 	case tea.KeyMsg:
 		key := msg.String()
 		if m.phase == phaseSyncing && key != "ctrl+c" {
@@ -149,6 +201,21 @@ func (m readerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if next, cmd, ok := m.promptKey(key); ok {
 			return next, cmd
+		}
+		nav := m.prefs.NavigationKeys
+		switch config.KeyName(key) {
+		case nav.NextPage:
+			m.pageDown()
+			return m, nil
+		case nav.PrevPage:
+			m.pageUp()
+			return m, nil
+		case nav.LineDown:
+			m.scrollDown(1)
+			return m, nil
+		case nav.LineUp:
+			m.scrollUp(1)
+			return m, nil
 		}
 		switch key {
 		case "q", "esc":
@@ -160,10 +227,6 @@ func (m readerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showHelp = !m.showHelp
 		case "C":
 			return m.reviewCloud()
-		case "j":
-			m.scrollDown(1)
-		case "k":
-			m.scrollUp(1)
 		case "down":
 			if m.pageMode {
 				m.pageDown()
@@ -176,9 +239,9 @@ func (m readerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.scrollUp(1)
 			}
-		case "d", "pgdown", "f", " ", "right":
+		case "d", "pgdown", "f", "right":
 			m.pageDown()
-		case "u", "pgup", "b", "left":
+		case "u", "pgup", "left":
 			m.pageUp()
 		case "P":
 			m.pageMode = !m.pageMode
@@ -229,10 +292,20 @@ func (m readerModel) View() string {
 	for len(body) < rows {
 		body = append(body, strings.Repeat(" ", column))
 	}
+	padding := m.verticalPadding()
+	outer := make([]string, 0, len(body)+2*padding)
+	for range padding {
+		outer = append(outer, "")
+	}
+	outer = append(outer, body...)
+	for range padding {
+		outer = append(outer, "")
+	}
+	body = outer
 	for i := range body {
 		body[i] = strings.Repeat(" ", margin) + body[i]
 	}
-	pct := fmt.Sprintf("%d%%", m.percent())
+	pct := m.progressText()
 	title := truncate(m.bookTitle, max(w-len(pct)-1, 0))
 	header := readDim.Render(title) + strings.Repeat(" ", max(w-lipgloss.Width(title)-len(pct), 0)) + readDim.Render(pct)
 	rule := readDim.Render(strings.Repeat("─", w))
@@ -248,7 +321,7 @@ func (m readerModel) View() string {
 	if !m.pageMode {
 		mode = "scroll"
 	}
-	right := mode + " · ?:help"
+	right := mode + " · S:settings · ?:help"
 	style := readDim
 	if m.statusMsg != "" {
 		right = m.statusMsg
@@ -259,7 +332,14 @@ func (m readerModel) View() string {
 	left = truncate(left, max(w-12, 1))
 	right = truncate(right, max(w-lipgloss.Width(left)-1, 0))
 	footer := readDim.Render(left) + strings.Repeat(" ", max(w-lipgloss.Width(left)-lipgloss.Width(right), 0)) + style.Render(right)
-	return frame(w, h, []string{header, rule}, body, []string{rule, footer})
+	var headers, footers []string
+	if m.prefs.ShowHeader {
+		headers = []string{header, rule}
+	}
+	if m.prefs.ShowFooter {
+		footers = []string{rule, footer}
+	}
+	return frame(w, h, headers, body, footers)
 }
 
 func (m readerModel) helpView() string {
@@ -269,12 +349,36 @@ func (m readerModel) helpView() string {
 	if m.note != nil && m.note.help != "" {
 		lines = append(lines, wrapText(m.note.help, inner)...)
 	}
-	lines = append(lines, "j/k            one displayed row", "↓/↑            page or row, following mode", "←/→ PgUp/PgDn  previous / next page", "d/u f/space/b  page down / up", "P              toggle page / scroll mode", "n/p g/G        chapter next/previous, start/end", "?              toggle help", "C              check Cloud or review a changed position", "q/esc          save locally, sync, return to library", "o c l enter    conflict: overwrite, load, local, read", "r l enter      failed sync: retry, local, read", "ctrl+c         quit without saving")
+	lines = append(lines,
+		fmt.Sprintf("%s/%s  one displayed row", m.prefs.NavigationKeys.LineDown, m.prefs.NavigationKeys.LineUp),
+		fmt.Sprintf("%s/%s  next / previous page", m.prefs.NavigationKeys.NextPage, m.prefs.NavigationKeys.PrevPage),
+		"↓/↑   follow page/scroll mode", "←/→ PgUp/PgDn  previous / next page",
+		"P     toggle page/scroll mode", "S     persistent settings",
+		"n/p g/G  chapter next/previous, start/end", "?  toggle help",
+		"C  check Cloud or review a changed position", "q/esc  save, sync, return",
+		"o c l enter  conflict: overwrite, load, local, read",
+		"r l enter  failed: retry, local, read", "ctrl+c  quit without saving")
 	for i, line := range lines {
 		lines[i] = truncate(line, inner)
 	}
 	box := lipgloss.NewStyle().Foreground(colorText).Border(lipgloss.RoundedBorder()).BorderForeground(colorFaint).Padding(0, 1).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, clipRows(box, h))
+}
+
+func (m *readerModel) progressText() string {
+	percent := fmt.Sprintf("%d%%", m.percent())
+	capacity := m.textCapacity()
+	pages := fmt.Sprintf("p%d/%d", m.rowIndex()/capacity+1, max((len(m.layout.rows)+capacity-1)/capacity, 1))
+	switch m.prefs.Progress {
+	case "pages":
+		return pages
+	case "both":
+		return percent + " · " + pages
+	case "none":
+		return ""
+	default:
+		return percent
+	}
 }
 
 // OpenBookMsg contains parsed content and the last known paragraph positions.

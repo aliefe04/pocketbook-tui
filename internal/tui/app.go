@@ -3,6 +3,7 @@ package tui
 import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"strings"
 
 	"github.com/aliefe/pocketbook-tui/internal/api"
 	"github.com/aliefe/pocketbook-tui/internal/config"
@@ -17,19 +18,24 @@ const (
 	screenDetail
 	screenReader
 	screenResume
+	screenSettings
 )
 
 type App struct {
-	screen  screen
-	login   tea.Model
-	library tea.Model
-	detail  tea.Model
-	reader  tea.Model
-	resume  tea.Model
-	client  *api.Client
-	cfg     *config.Config
-	width   int
-	height  int
+	screen         screen
+	login          tea.Model
+	library        tea.Model
+	detail         tea.Model
+	reader         tea.Model
+	resume         tea.Model
+	settings       tea.Model
+	settingsOrigin screen
+	prefs          config.Preferences
+	prefsErr       error
+	client         *api.Client
+	cfg            *config.Config
+	width          int
+	height         int
 }
 
 func NewApp() (*App, error) {
@@ -49,6 +55,8 @@ func NewApp() (*App, error) {
 		client: client,
 		cfg:    cfg,
 	}
+	app.prefs, app.prefsErr = config.LoadPreferences()
+	applyTheme(app.prefs)
 
 	if cfg.IsLoggedIn() {
 		app.screen = screenLibrary
@@ -57,24 +65,47 @@ func NewApp() (*App, error) {
 		app.screen = screenLogin
 		app.login = newLoginModel(client, cfg)
 	}
+	app.applyPreferences(app.prefs)
 
 	return app, nil
 }
 
 func (a *App) Init() tea.Cmd {
+	var cmd tea.Cmd
 	switch a.screen {
 	case screenLogin:
-		return a.login.Init()
+		cmd = a.login.Init()
 	case screenLibrary:
-		return a.library.Init()
+		cmd = a.library.Init()
 	case screenDetail:
-		return a.detail.Init()
+		cmd = a.detail.Init()
 	}
-	return nil
+	return tea.Batch(cmd, mouseCommand(a.preferences().Mouse))
 }
 
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if msg.String() == "S" && (a.screen == screenReader || a.screen == screenLibrary || a.screen == screenDetail) {
+			if library, ok := a.library.(libraryModel); ok && a.screen == screenLibrary && library.filterMode {
+				return a, a.dispatch(msg)
+			}
+			if r, ok := a.reader.(readerModel); ok && a.screen == screenReader && r.phase == phaseSyncing {
+				return a, nil
+			}
+			a.settingsOrigin = a.screen
+			a.settings = a.sized(settingsModel{draft: a.preferences(), err: a.prefsErr})
+			a.screen = screenSettings
+			return a, nil
+		}
+	case settingsClosedMsg:
+		a.screen = a.settingsOrigin
+		if msg.saved {
+			a.prefsErr = nil
+			a.applyPreferences(msg.prefs)
+			return a, mouseCommand(msg.prefs.Mouse)
+		}
+		return a, nil
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
@@ -83,6 +114,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case LoginSuccessMsg:
 		a.screen = screenLibrary
 		a.library = a.sized(newLibraryModel(a.client, a.cfg))
+		a.applyPreferences(a.preferences())
 		return a, a.library.Init()
 
 	case ShowDetailMsg:
@@ -151,6 +183,8 @@ func (a *App) dispatch(msg tea.Msg) tea.Cmd {
 		return update(&a.reader, msg)
 	case screenResume:
 		return update(&a.resume, msg)
+	case screenSettings:
+		return update(&a.settings, msg)
 	}
 	return nil
 }
@@ -164,6 +198,7 @@ func (a *App) broadcast(msg tea.Msg) tea.Cmd {
 		update(&a.detail, msg),
 		update(&a.reader, msg),
 		update(&a.resume, msg),
+		update(&a.settings, msg),
 	)
 }
 
@@ -232,7 +267,11 @@ func (a *App) showReader(r readerModel) (tea.Model, tea.Cmd) {
 	if old, ok := a.reader.(readerModel); ok {
 		old.invalidate()
 	}
-	r, cmd := r.startRefresh()
+	r.applyPreferences(a.preferences())
+	var cmd tea.Cmd
+	if r.prefs.CloudAutoRefresh {
+		r, cmd = r.startRefresh()
+	}
 	a.screen = screenReader
 	a.reader = r
 	return a, cmd
@@ -284,17 +323,31 @@ func update(model *tea.Model, msg tea.Msg) tea.Cmd {
 }
 
 func (a *App) View() string {
+	var view string
 	switch a.screen {
 	case screenLogin:
-		return a.login.View()
+		view = a.login.View()
 	case screenLibrary:
-		return a.library.View()
+		view = a.library.View()
 	case screenDetail:
-		return a.detail.View()
+		view = a.detail.View()
 	case screenReader:
-		return a.reader.View()
+		view = a.reader.View()
 	case screenResume:
-		return a.resume.View()
+		view = a.resume.View()
+	case screenSettings:
+		view = a.settings.View()
 	}
-	return ""
+	if a.prefsErr != nil && a.screen != screenSettings {
+		rows := strings.Split(view, "\n")
+		if len(rows) > 0 {
+			w, _ := termSize(a.width, a.height)
+			rows[0] = errorStyle.Render(truncate("Preferences error. S:settings", w))
+			view = strings.Join(rows, "\n")
+		}
+	}
+	if a.preferences().Theme != "auto" {
+		view = lipgloss.NewStyle().Background(colorBackground).Render(view)
+	}
+	return view
 }

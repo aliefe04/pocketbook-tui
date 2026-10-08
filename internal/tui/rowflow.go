@@ -14,12 +14,19 @@ import (
 type visualRow struct {
 	text                  string
 	chapter, line, offset int
+	part                  int
 	title                 bool
+}
+
+type flowOptions struct {
+	lineGap, paragraphGap int
+	justify               bool
 }
 
 type readerLayout struct {
 	content *reader.BookContent
 	width   int
+	options flowOptions
 	rows    []visualRow
 }
 
@@ -90,8 +97,8 @@ func wrapSource(s string, width int) []visualRow {
 	return rows
 }
 
-func buildReaderLayout(content *reader.BookContent, width int) *readerLayout {
-	l := &readerLayout{content: content, width: max(width, 1)}
+func buildReaderLayout(content *reader.BookContent, width int, options flowOptions) *readerLayout {
+	l := &readerLayout{content: content, width: max(width, 1), options: options}
 	if content == nil {
 		return l
 	}
@@ -103,22 +110,57 @@ func buildReaderLayout(content *reader.BookContent, width int) *readerLayout {
 				visualRow{chapter: ci, line: 2, title: true})
 		}
 		for li, text := range ch.Lines {
-			for _, row := range wrapSource(text, width) {
+			wrapped := wrapSource(text, width)
+			for wi, row := range wrapped {
 				row.chapter, row.line = ci, ch.TitleHeight()+li
+				if options.justify && wi < len(wrapped)-1 {
+					row.text = justifyRow(row.text, width)
+				}
 				l.rows = append(l.rows, row)
+				gap := options.lineGap
+				if wi == len(wrapped)-1 {
+					gap += options.paragraphGap
+				}
+				if row.text == "" {
+					gap = options.paragraphGap
+				}
+				for part := 1; part <= gap; part++ {
+					l.rows = append(l.rows, visualRow{chapter: ci, line: row.line, offset: row.offset, part: part})
+				}
 			}
 		}
 	}
 	return l
 }
 
-func (l *readerLayout) index(chapter, line, offset int) int {
+func (l *readerLayout) index(chapter, line, offset, part int) int {
 	if l == nil || len(l.rows) == 0 {
 		return 0
 	}
 	i := sort.Search(len(l.rows), func(i int) bool {
 		r := l.rows[i]
-		return r.chapter > chapter || (r.chapter == chapter && (r.line > line || (r.line == line && r.offset > offset)))
+		return r.chapter > chapter || (r.chapter == chapter && (r.line > line || (r.line == line && (r.offset > offset || (r.offset == offset && r.part > part)))))
 	})
 	return max(i-1, 0)
+}
+
+func justifyRow(text string, width int) string {
+	words := strings.Fields(text)
+	if len(words) < 2 {
+		return text
+	}
+	extra := max(width-ansi.StringWidth(text), 0)
+	var b strings.Builder
+	b.Grow(len(text) + extra)
+	for i, word := range words {
+		if i > 0 {
+			spaces := 1 + extra/(len(words)-1)
+			if i <= extra%(len(words)-1) {
+				spaces++
+			}
+			b.WriteString(strings.Repeat(" ", spaces))
+		}
+		b.WriteString(word)
+	}
+	return b.String()
 }

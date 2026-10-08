@@ -109,6 +109,7 @@ When Cloud and local positions differ, the TUI shows both sources and their save
 | `g` / `G` | Start / end of the chapter |
 | `?` | Show or hide the control list |
 | `C` | Check Cloud again, or review a changed Cloud position |
+| `S` | Open settings from the reader, library, or book details |
 | `q` / `esc` | Save locally and sync supported EPUB positions. Return after Cloud confirms |
 | `ctrl+c` | Quit without saving the position |
 
@@ -126,6 +127,34 @@ Cloud failures and changed bookmarks keep the reader open with these choices:
 | `ctrl+c` | Quit without another save or Cloud write |
 
 Small terminals show compact choices. The `↵` symbol means `enter`.
+
+## Customization
+
+Press `S` to open settings. Changes stay in a draft until you press `s` to save.
+Press `esc` to discard the draft. Press `r` to reset the draft to defaults.
+Use `↑`/`↓` to select a setting, `←`/`→` to change it, and `tab` to reach the next category.
+
+| Category | Settings |
+|----------|----------|
+| Appearance | Auto, dark, light, or sepia theme. Blue, green, amber, purple, or rose accent |
+| Reading | Page or scroll mode. Reading width, side margins, top/bottom margins, line spacing, paragraph spacing, left alignment or justification |
+| Reading information | Header and footer visibility. Percentage, terminal page count, both, or neither. Page overlap |
+| Controls | Mouse wheel. Separate custom keys for next page, previous page, line down, and line up |
+| Library | Recent reading, title, or author order. Compact one-row entries |
+| Cloud | Automatic checks on opening. Sync on exit. Request timeout from 5 to 120 seconds |
+
+For a custom key, select its setting, press `enter`, then press the new key.
+Settings reject duplicate keys and keys reserved for safe exits, Cloud recovery, and chapter navigation.
+Page overlap repeats selected rows when you turn a page.
+
+Disabling automatic Cloud checks still permits manual `C` checks.
+Disabling Cloud sync keeps reading positions on this device only, including during conflict recovery.
+Layout changes preserve the source passage. Page counts describe the current terminal layout.
+
+Preferences live in `~/.config/pocketbook-tui/preferences.json`, separate from login and reading-position files.
+Invalid preferences show an error without replacing the file.
+Change font family and font size in your terminal application.
+
 
 ## Books and reading
 
@@ -197,6 +226,7 @@ Physical Verse and iOS results remain unverified until these device checks pass.
 | What | Where |
 |------|-------|
 | Session (token, refresh token, provider, shop ID) | `~/.config/pocketbook-tui/config.json` (created with mode `0600`) |
+| Preferences | `~/.config/pocketbook-tui/preferences.json` (atomic saves, mode `0600`) |
 | Downloaded books | `~/.config/pocketbook/` |
 | Reading positions | `~/.config/pocketbook-tui/positions/<book-hash>.json` |
 

@@ -147,6 +147,9 @@ func (m readerModel) leave() (tea.Model, tea.Cmd) {
 	}
 	m.invalidate()
 	m.note = nil
+	if !m.prefs.CloudSync {
+		return m, leaveCmd(m.bookHash, nil, "Saved locally; Cloud sync is disabled in settings", false)
+	}
 	if m.cloud == nil {
 		return m, leaveCmd(m.bookHash, nil, "", false)
 	}
@@ -277,6 +280,7 @@ func (m readerModel) onReload(msg cloudReloadMsg) (tea.Model, tea.Cmd) {
 	}
 	m.clampLineOffset()
 	m.withinLineOffset = 0
+	m.withinLinePart = 0
 	m.ensureLayout()
 	link := *m.cloud
 	link.baseline = msg.cloud
@@ -309,6 +313,10 @@ func (m readerModel) promptKey(key string) (readerModel, tea.Cmd, bool) {
 	inPrompt := m.phase == phaseConflict || m.phase == phaseFailed
 	switch {
 	case m.phase == phaseConflict && key == "o" && m.conflict != nil:
+		if !m.prefs.CloudSync {
+			m.setStatus("Cloud sync is disabled. l saves locally", true)
+			return m, nil, true
+		}
 		if !m.saveLocal() {
 			return m, nil, true
 		}

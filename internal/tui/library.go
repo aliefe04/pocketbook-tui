@@ -41,6 +41,8 @@ type libraryModel struct {
 	statusIsError bool
 	width         int
 	height        int
+	sortOrder     string
+	compact       bool
 }
 
 func newLibraryModel(client *api.Client, cfg *config.Config) libraryModel {
@@ -289,7 +291,18 @@ func (m *libraryModel) applyFilter() {
 func (m *libraryModel) setBooks(fetched []pbc.Book) {
 	prev, hadSelection := m.selectedBook()
 	m.fetched = fetched
-	m.books = sortByRecency(fetched)
+	if m.sortOrder == "title" || m.sortOrder == "author" {
+		m.books = slices.Clone(fetched)
+		slices.SortStableFunc(m.books, func(a, b pbc.Book) int {
+			left, right := displayTitle(a.Title), displayTitle(b.Title)
+			if m.sortOrder == "author" {
+				left, right = a.MetaData.Authors, b.MetaData.Authors
+			}
+			return strings.Compare(strings.ToLower(left), strings.ToLower(right))
+		})
+	} else {
+		m.books = sortByRecency(fetched)
+	}
 	m.filteredBooks = filterBooks(m.books, m.filter)
 	if hadSelection {
 		for i, b := range m.filteredBooks {
@@ -391,7 +404,14 @@ func (m *libraryModel) cursorUp() {
 // screen after a resize.
 func (m libraryModel) listCapacity() int {
 	_, h := termSize(m.width, m.height)
-	return max((h-libraryChromeRows)/bookRowHeight, 1)
+	return max((h-libraryChromeRows)/m.rowHeight(), 1)
+}
+
+func (m libraryModel) rowHeight() int {
+	if m.compact {
+		return 1
+	}
+	return bookRowHeight
 }
 
 func (m *libraryModel) adjustScroll() {
@@ -512,22 +532,29 @@ func (m libraryModel) listRows(width int) []string {
 	start := scrollWindow(m.scrollOffset, m.cursor, len(m.filteredBooks), capacity)
 	end := min(start+capacity, len(m.filteredBooks))
 
-	rows := make([]string, 0, (end-start)*bookRowHeight)
+	rows := make([]string, 0, (end-start)*m.rowHeight())
 	for i := start; i < end; i++ {
-		rows = append(rows, bookRows(m.filteredBooks[i], i == m.cursor, width)...)
+		rows = append(rows, bookRows(m.filteredBooks[i], i == m.cursor, width, m.compact)...)
 	}
 	return rows
 }
 
-// bookRows renders one book as two rows: title, then a metadata line. The
-// selected book gets a full-width highlight band and an accent marker.
-func bookRows(book pbc.Book, selected bool, width int) []string {
+// bookRows renders a title and an optional metadata row.
+func bookRows(book pbc.Book, selected bool, width int, compact bool) []string {
 	icon := "  "
 	switch {
 	case book.Favorite:
 		icon = "★ "
 	case book.IsAudioBook:
 		icon = "♪ "
+	}
+	titleText := truncate(cleanBookText(displayTitle(book.Title)), width-4)
+	titleRow := mutedStyle.Render("  "+icon) + textStyle.Render(titleText)
+	if selected {
+		titleRow = selectedMark.Render("› ") + selectedStyle.Width(width-2).Render(icon+titleText)
+	}
+	if compact {
+		return []string{titleRow}
 	}
 
 	author := book.MetaData.Authors
@@ -541,17 +568,16 @@ func bookRows(book pbc.Book, selected bool, width int) []string {
 		humanBytes(book.Bytes),
 	)
 
-	titleText := truncate(displayTitle(book.Title), width-4)
 	metaText := truncate(meta, width-4)
 
 	if !selected {
 		return []string{
-			mutedStyle.Render("  "+icon) + textStyle.Render(titleText),
+			titleRow,
 			mutedStyle.Render("    " + metaText),
 		}
 	}
 	return []string{
-		selectedMark.Render("› ") + selectedStyle.Width(width-2).Render(icon+titleText),
+		titleRow,
 		selectedMark.Render("  ") + selectedMeta.Width(width-2).Render("  "+metaText),
 	}
 }
