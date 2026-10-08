@@ -26,6 +26,8 @@ type flowOptions struct {
 	justify               bool
 	imageMode, theme      string
 	imageHeight           int
+	native                bool
+	cellW, cellH          int
 }
 
 type readerLayout struct {

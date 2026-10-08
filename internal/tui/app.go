@@ -161,6 +161,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a.enterReader(msg.open, &msg.chosen)
 
+	case openOriginalResultMsg:
+		if a.screen == screenReader || (a.screen == screenSettings && a.settingsOrigin == screenReader) {
+			return a, update(&a.reader, msg)
+		}
+		return a, nil
 	case refreshMsg:
 		// The background Cloud read belongs to the reader, which may no longer be
 		// showing. The reader's session check decides whether the result applies.

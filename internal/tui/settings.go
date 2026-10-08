@@ -33,8 +33,9 @@ var settingsOptions = []settingOption{
 	{category: "Reading", label: "Footer", field: "ShowFooter", boolean: true},
 	{category: "Reading", label: "Progress", field: "Progress", choices: config.ProgressModes, description: "Page numbers refer to this terminal layout, not device pages."},
 	{category: "Reading", label: "Page overlap", field: "PageOverlap", maximum: 3, step: 1, description: "Repeat this many displayed rows on the next page."},
+	{category: "Images", label: "Protocol", field: "ImageBackend", choices: config.ImageBackends, description: "Auto uses Kitty native graphics when available; blocks uses portable half-block characters."},
 	{category: "Images", label: "Photo display", field: "ImageMode", choices: config.ImageModes, description: "Portable color or grayscale blocks, captions only, or hidden. I opens the image viewer."},
-	{category: "Images", label: "Inline height", field: "ImageHeight", minimum: 4, maximum: 30, step: 2, description: "Maximum image rows in the reading flow. The viewer fits your terminal."},
+	{category: "Images", label: "Inline height", field: "ImageHeight", minimum: 0, maximum: 60, step: 2, description: "Maximum image rows in the reading flow (0 = auto). The viewer fits your terminal."},
 	{category: "Controls", label: "Mouse wheel", field: "Mouse", boolean: true, description: "Wheel follows page/scroll mode. Disable to keep terminal selection."},
 	{category: "Controls", label: "Next page key", field: "NextPage", key: true},
 	{category: "Controls", label: "Previous page key", field: "PrevPage", key: true},
@@ -78,6 +79,11 @@ func settingValue(p *config.Preferences, field string) string {
 		return strconv.Itoa(p.PageOverlap)
 	case "Mouse":
 		return strconv.FormatBool(p.Mouse)
+	case "ImageBackend":
+		if p.ImageBackend == "" {
+			return "auto"
+		}
+		return p.ImageBackend
 	case "ImageMode":
 		return p.ImageMode
 	case "ImageHeight":
@@ -135,6 +141,8 @@ func setSettingValue(p *config.Preferences, field, value string) {
 		p.PageOverlap = n
 	case "Mouse":
 		p.Mouse = b
+	case "ImageBackend":
+		p.ImageBackend = value
 	case "ImageMode":
 		p.ImageMode = value
 	case "ImageHeight":
@@ -248,6 +256,13 @@ func (m settingsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if o.field == "ReadingWidth" && n > 0 && n < 20 {
 					if delta > 0 {
 						n = 20
+					} else {
+						n = 0
+					}
+				}
+				if o.field == "ImageHeight" && n > 0 && n < 4 {
+					if delta > 0 {
+						n = 4
 					} else {
 						n = 0
 					}

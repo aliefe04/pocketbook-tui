@@ -196,3 +196,99 @@ func TestMatchingLocalAndCloudPhotoBookmarksDoNotAskOnEveryOpen(t *testing.T) {
 		t.Fatal("automatic resume did not prefer the exact native image")
 	}
 }
+
+func TestDownscalingAveragesFineLinesAndCheckerboard(t *testing.T) {
+	// 32x32 image: white background with a 1px black horizontal line across center
+	img := image.NewNRGBA(image.Rect(0, 0, 32, 32))
+	for y := range 32 {
+		for x := range 32 {
+			if y == 16 {
+				img.SetNRGBA(x, y, color.NRGBA{R: 0, G: 0, B: 0, A: 255})
+			} else {
+				img.SetNRGBA(x, y, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
+			}
+		}
+	}
+
+	// Downscale to 4 columns, 2 rows (4x4 half-block pixels)
+	rows, err := renderPixels(img, 4, 2, "color", "dark", 1)
+	if err != nil {
+		t.Fatalf("renderPixels failed: %v", err)
+	}
+	view := strings.Join(rows, "")
+	// Nearest neighbor would either make a row 100% black or 100% white.
+	// Area averaging preserves the line by producing gray values (e.g. not purely 255,255,255 and not 0,0,0)
+	foundAntialiased := false
+	colors := regexp.MustCompile(`\x1b\[(?:38|48);2;(\d+);(\d+);(\d+)m`).FindAllStringSubmatch(view, -1)
+	for _, c := range colors {
+		if c[1] != "255" && c[1] != "0" {
+			foundAntialiased = true
+			break
+		}
+	}
+	if !foundAntialiased {
+		t.Fatal("box averaging failed to preserve fine line: output was purely binary without intermediate antialiased values")
+	}
+
+	// Checkerboard: alternating black and white pixels
+	chk := image.NewNRGBA(image.Rect(0, 0, 16, 16))
+	for y := range 16 {
+		for x := range 16 {
+			if (x+y)%2 == 0 {
+				chk.SetNRGBA(x, y, color.NRGBA{R: 0, G: 0, B: 0, A: 255})
+			} else {
+				chk.SetNRGBA(x, y, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
+			}
+		}
+	}
+	chkRows, err := renderPixels(chk, 4, 2, "color", "dark", 1)
+	if err != nil {
+		t.Fatalf("renderPixels checkerboard failed: %v", err)
+	}
+	chkView := strings.Join(chkRows, "")
+	chkColors := regexp.MustCompile(`\x1b\[(?:38|48);2;(\d+);(\d+);(\d+)m`).FindAllStringSubmatch(chkView, -1)
+	for _, c := range chkColors {
+		// Average of 0 and 255 is ~127
+		if c[1] == "0" || c[1] == "255" {
+			t.Fatalf("checkerboard aliased to pure color %s instead of averaging to gray", c[1])
+		}
+	}
+}
+
+func TestAlphaGrayscaleAndNonZeroBounds(t *testing.T) {
+	// Empty bounds error
+	emptyImg := image.NewNRGBA(image.Rect(0, 0, 0, 0))
+	_, err := renderPixels(emptyImg, 10, 5, "color", "dark", 1)
+	if err == nil {
+		t.Fatal("expected error for empty image bounds, got nil")
+	}
+
+	// Alpha compositing: 50% transparent white against dark background [23, 26, 32]
+	alphaImg := image.NewNRGBA(image.Rect(0, 0, 2, 2))
+	for y := range 2 {
+		for x := range 2 {
+			alphaImg.SetNRGBA(x, y, color.NRGBA{R: 255, G: 255, B: 255, A: 128})
+		}
+	}
+	rows, err := renderPixels(alphaImg, 2, 1, "color", "dark", 1)
+	if err != nil {
+		t.Fatalf("renderPixels alpha failed: %v", err)
+	}
+	// Background is [23, 26, 32]. 50% blend with [255, 255, 255] should be roughly [139, 140, 143]
+	colors := regexp.MustCompile(`\x1b\[(?:38|48);2;(\d+);(\d+);(\d+)m`).FindAllStringSubmatch(strings.Join(rows, ""), -1)
+	if len(colors) == 0 {
+		t.Fatal("no colors rendered for alpha image")
+	}
+
+	// Grayscale
+	grayRows, err := renderPixels(alphaImg, 2, 1, "grayscale", "dark", 1)
+	if err != nil {
+		t.Fatalf("renderPixels grayscale failed: %v", err)
+	}
+	grayColors := regexp.MustCompile(`\x1b\[(?:38|48);2;(\d+);(\d+);(\d+)m`).FindAllStringSubmatch(strings.Join(grayRows, ""), -1)
+	for _, c := range grayColors {
+		if c[1] != c[2] || c[2] != c[3] {
+			t.Fatalf("grayscale pixel channels not equal: R=%s G=%s B=%s", c[1], c[2], c[3])
+		}
+	}
+}

@@ -145,7 +145,7 @@ Use `↑`/`↓` to select a setting, `←`/`→` to change it, and `tab` to reac
 | Appearance | Auto, dark, light, or sepia theme. Blue, green, amber, purple, or rose accent |
 | Reading | Page or scroll mode. Reading width, side margins, top/bottom margins, line spacing, paragraph spacing, left alignment or justification |
 | Reading information | Header and footer visibility. Percentage, terminal page count, both, or neither. Page overlap |
-| Images | Color, grayscale, captions only, or hidden. Inline image height from 4 to 30 rows |
+| Images | Color, grayscale, captions only, or hidden. Auto/native graphics or portable blocks. Auto height, or 4 to 60 rows |
 | Controls | Mouse wheel. Separate custom keys for next page, previous page, line down, and line up |
 | Library | Recent reading, title, or author order. Compact one-row entries |
 | Cloud | Automatic checks on opening. Sync on exit. Request timeout from 5 to 120 seconds |
@@ -181,13 +181,26 @@ Change font family and font size in your terminal application.
 
 ### Embedded photos
 
-Photos use colored Unicode half-block cells, so they do not require a terminal-specific graphics extension.
-Each cell displays an upper and a lower pixel.
-Use a Unicode and color-capable terminal, or choose captions-only mode.
+The reader checks native image support at startup with a short terminal query.
+Compatible terminals display full-resolution images through the [Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/).
+Native placement preserves the image's pixels instead of reducing its labels to colored text cells.
+
+Other terminals use portable colored blocks with area averaging when shrinking images.
+This fallback has fewer pixels, so small diagram labels can remain unreadable.
+Choose captions-only mode if you do not want block previews.
+
+Inline height defaults to Auto, which follows the reading width and image aspect ratio.
+An explicit saved height remains unchanged.
+Use settings to select Auto/native rendering or force portable blocks.
+
 
 Press `I` to open the photo viewer. Press `n`/`p` to change photos, `+`/`-` to zoom, and arrow keys to pan.
 Press `0` to fit the photo again. Press `esc`, `q`, or `I` to return to reading without saving or syncing.
 The viewer also works when inline photos are hidden.
+
+Press `O` inside the viewer to open the original image in your operating system's image viewer.
+The reader creates a private temporary PNG and keeps your reading position unchanged.
+It removes its temporary exports when you quit.
 
 The reader accepts embedded PNG, JPEG, and GIF resources. GIF display uses the first frame.
 It does not fetch remote images or render SVG vectors.

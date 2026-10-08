@@ -16,8 +16,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	p := tea.NewProgram(app, tea.WithAltScreen())
+	session := tui.NewGraphicsSession(app)
+	defer session.Close()
+
+	opts := append([]tea.ProgramOption{tea.WithAltScreen()}, session.ProgramOptions()...)
+	p := tea.NewProgram(session.Model(), opts...)
 	if _, err := p.Run(); err != nil {
+		_ = session.Close()
 		fmt.Fprintf(os.Stderr, "Error running app: %v\n", err)
 		os.Exit(1)
 	}

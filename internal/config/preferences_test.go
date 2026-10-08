@@ -195,6 +195,14 @@ func TestValidateRanges(t *testing.T) {
 		{"unknown accent", func(p *Preferences) { p.Accent = "teal" }, false},
 		{"unknown sort", func(p *Preferences) { p.LibrarySort = "year" }, false},
 		{"unknown progress", func(p *Preferences) { p.Progress = "chapters" }, false},
+		{"image height auto", func(p *Preferences) { p.ImageHeight = 0 }, true},
+		{"image height minimum", func(p *Preferences) { p.ImageHeight = 4 }, true},
+		{"image height maximum", func(p *Preferences) { p.ImageHeight = 60 }, true},
+		{"image height below minimum", func(p *Preferences) { p.ImageHeight = 3 }, false},
+		{"image height above maximum", func(p *Preferences) { p.ImageHeight = 61 }, false},
+		{"image backend auto", func(p *Preferences) { p.ImageBackend = "auto" }, true},
+		{"image backend blocks", func(p *Preferences) { p.ImageBackend = "blocks" }, true},
+		{"unknown image backend", func(p *Preferences) { p.ImageBackend = "sixel" }, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

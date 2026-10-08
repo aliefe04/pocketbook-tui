@@ -28,6 +28,7 @@ type Preferences struct {
 	Progress         string         `json:"progress"`
 	PageOverlap      int            `json:"page_overlap"`
 	Mouse            bool           `json:"mouse"`
+	ImageBackend     string         `json:"image_backend"`
 	ImageMode        string         `json:"image_mode"`
 	ImageHeight      int            `json:"image_height"`
 	NavigationKeys   NavigationKeys `json:"navigation_keys"`
@@ -57,6 +58,7 @@ var (
 	ProgressModes = []string{"percent", "pages", "both", "none"}
 	LibrarySorts  = []string{"recent", "title", "author"}
 	ImageModes    = []string{"color", "grayscale", "captions", "hidden"}
+	ImageBackends = []string{"auto", "blocks"}
 	ReservedKeys  = []string{"q", "esc", "ctrl+c", "C", "?", "S", "P", "I", "n", "p", "g", "G", "o", "c", "l", "r", "enter", "pgup", "pgdown", "up", "down", "left", "right", "d", "u"}
 )
 
@@ -88,8 +90,9 @@ func DefaultPreferences() Preferences {
 		LineSpacing:      0,
 		ParagraphSpacing: 0,
 		Alignment:        "left",
+		ImageBackend:     "auto",
 		ImageMode:        "color",
-		ImageHeight:      12,
+		ImageHeight:      0,
 		ShowHeader:       true,
 		ShowFooter:       true,
 		Progress:         "percent",
@@ -151,8 +154,17 @@ func (p Preferences) Validate() error {
 	if !slices.Contains(ImageModes, p.ImageMode) {
 		return fmt.Errorf("image_mode must be color, grayscale, captions or hidden")
 	}
-	if err := inRange("image_height", p.ImageHeight, 4, 30); err != nil {
-		return err
+	backend := p.ImageBackend
+	if backend == "" {
+		backend = "auto"
+	}
+	if !slices.Contains(ImageBackends, backend) {
+		return fmt.Errorf("image_backend must be auto or blocks")
+	}
+	if p.ImageHeight != 0 {
+		if err := inRange("image_height", p.ImageHeight, 4, 60); err != nil {
+			return err
+		}
 	}
 	if p.ReadingWidth != 0 && (p.ReadingWidth < ReadingWidthMin || p.ReadingWidth > ReadingWidthMax) {
 		return fmt.Errorf("reading_width must be 0 (auto) or %d to %d", ReadingWidthMin, ReadingWidthMax)

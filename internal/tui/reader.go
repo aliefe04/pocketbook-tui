@@ -26,8 +26,10 @@ type readerModel struct {
 	imageZoom                                float64
 	imageCache                               []string
 	imageCacheWidth, imageCacheHeight        int
+	imageCacheNative                         bool
 	imageDecoded                             image.Image
 	imageDecodedAt                           imageAddress
+	imageNotice                              string
 	prefs                                    config.Preferences
 	layout                                   *readerLayout
 	pageMode                                 bool
@@ -98,7 +100,18 @@ func (m readerModel) contentWidth() int {
 }
 func (m *readerModel) ensureLayout() {
 	w := m.contentWidth()
-	options := flowOptions{lineGap: m.prefs.LineSpacing, paragraphGap: m.prefs.ParagraphSpacing, justify: m.prefs.Alignment == "justify", imageMode: m.prefs.ImageMode, imageHeight: m.prefs.ImageHeight, theme: m.prefs.Theme}
+	cellW, cellH := currentCellGeometry()
+	options := flowOptions{
+		lineGap:      m.prefs.LineSpacing,
+		paragraphGap: m.prefs.ParagraphSpacing,
+		justify:      m.prefs.Alignment == "justify",
+		imageMode:    m.prefs.ImageMode,
+		imageHeight:  m.prefs.ImageHeight,
+		theme:        m.prefs.Theme,
+		native:       isNativeGraphicsActive(),
+		cellW:        cellW,
+		cellH:        cellH,
+	}
 	if m.layout == nil || m.layout.content != m.content || m.layout.width != w || m.layout.options != options {
 		m.layout = buildReaderLayout(m.content, w, options)
 	}
@@ -198,6 +211,18 @@ func (m readerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onReload(msg)
 	case refreshMsg:
 		return m.onRefresh(msg)
+	case openOriginalResultMsg:
+		if msg.session != m.session {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.setStatus(fmt.Sprintf("Cannot open image: %v", msg.err), true)
+			m.imageNotice = "Cannot open original"
+		}
+		if msg.err == nil {
+			m.imageNotice = "Original opened"
+		}
+		return m, nil
 	case tea.MouseMsg:
 		if m.prefs.Mouse && m.phase != phaseSyncing {
 			if m.showHelp {
