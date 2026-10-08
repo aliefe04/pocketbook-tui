@@ -74,9 +74,8 @@ func openBookCmd(client *api.Client, token string, book pbc.Book, origin screen)
 // (downloading it only when absent), parses it, and loads both saved positions:
 // the local one, and the account's Cloud one located in the parsed book.
 //
-// An EPUB first has its Cloud position read again, so a position changed on
-// another device after the library loaded is the one the reader sees. If that
-// read fails, the library's snapshot is used, and RefreshErr says why.
+// The Cloud position is the last one the library saw. openBook never waits for
+// the native API; the reader checks Cloud in the background once it is open.
 // Rejections happen before any download. Nothing is written.
 func openBook(client *api.Client, token string, book pbc.Book) OpenBookMsg {
 	if book.IsDrm || book.IsLcp {
@@ -100,20 +99,9 @@ func openBook(client *api.Client, token string, book pbc.Book) OpenBookMsg {
 		return OpenBookMsg{Err: fmt.Errorf("read file: %w", err)}
 	}
 
-	// The library's snapshot is the fallback, and the baseline when the fresh
-	// read fails.
+	// The library's snapshot is the last known Cloud state, and the baseline the
+	// reader's Cloud checks compare against.
 	native, hasNative := latestNativeProgress(book)
-	baseline := native
-	var refreshErr error
-	if format == "epub" {
-		fresh, err := client.NativePosition(context.Background(), token, book.FastHash)
-		if err != nil {
-			refreshErr = err
-		} else {
-			baseline = progressFromNative(fresh)
-			native, hasNative = baseline, baseline.hasProgress()
-		}
-	}
 
 	// The EPUB pointer is resolved in the same pass that parses the book.
 	var content *reader.BookContent
@@ -146,7 +134,6 @@ func openBook(client *api.Client, token string, book pbc.Book) OpenBookMsg {
 		Position:        pos,
 		PositionErr:     posErr,
 		PositionSavedAt: savedAt,
-		RefreshErr:      refreshErr,
 	}
 	msg.Cloud, msg.CloudErr = cloudBookmark(native, hasNative, content, bm)
 	msg.Sync = &cloudLink{
@@ -154,7 +141,7 @@ func openBook(client *api.Client, token string, book pbc.Book) OpenBookMsg {
 		token:    token,
 		bookHash: book.FastHash,
 		epub:     format == "epub",
-		baseline: baseline,
+		baseline: native,
 		reparse: func(pointer string) (*reader.BookContent, reader.Bookmark, error) {
 			return reader.ParseEPUBAt(data, pointer)
 		},

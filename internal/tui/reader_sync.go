@@ -1,12 +1,32 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/aliefe/pocketbook-tui/internal/reader"
 )
+
+// defaultCloudTimeout bounds each native request a reading session makes. A new
+// reader starts with it.
+const defaultCloudTimeout = 30 * time.Second
+
+// cloudNoteRows is how many body rows a Cloud status may take.
+const cloudNoteRows = 2
+
+// cloudStatus is a Cloud status for the reader. body is what the body shows.
+// brief takes its place when body needs more than cloudNoteRows rows, and help
+// is the full text that the help view shows.
+type cloudStatus struct {
+	body  string
+	brief string
+	help  string
+	isErr bool
+}
 
 // syncPhase is where a reading session stands with Cloud.
 type syncPhase int
@@ -59,13 +79,73 @@ func (m readerModel) unmoved() bool {
 	return m.chapterIdx == m.startChapter && m.lineOffset == m.startLine
 }
 
+// reqID returns the identity of the session's current request.
+func (m readerModel) reqID() requestID {
+	return requestID{session: m.session, gen: m.gen}
+}
+
+// invalidate ends the request in flight, if any. Its context is cancelled, and
+// its result is ignored when it arrives. Nothing is written by it.
+func (m *readerModel) invalidate() {
+	if m.cancel != nil {
+		m.cancel()
+		m.cancel = nil
+	}
+	m.gen++
+	m.refreshing = false
+}
+
+// setNote shows a Cloud status.
+func (m *readerModel) setNote(body, brief, help string, isErr bool) {
+	m.note = &cloudStatus{body: body, brief: brief, help: help, isErr: isErr}
+}
+
+// startRefresh begins the background read of Cloud that a session makes when it
+// opens. Only an EPUB with a Cloud link is read, and only while no other read is
+// in flight. The result arrives as refreshMsg. The place the reader shows does
+// not change, and nothing is written.
+func (m readerModel) startRefresh() (readerModel, tea.Cmd) {
+	if m.cloud == nil || !m.cloud.epub || m.refreshing || m.phase != phaseIdle {
+		return m, nil
+	}
+	m.invalidate()
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	m.refreshing = true
+	m.setNote("Checking Cloud…", "Checking Cloud…",
+		"Checking Cloud. The saved position is shown until Cloud answers.", false)
+	return m, refreshCmd(ctx, m.cloud, m.cloudTimeout, m.reqID())
+}
+
+// reviewCloud is the C key. With a changed Cloud position waiting, it opens the
+// conflict prompt, so the user chooses what happens. Otherwise it checks Cloud
+// again. It does nothing while a request is in flight or a prompt is open.
+func (m readerModel) reviewCloud() (tea.Model, tea.Cmd) {
+	if m.phase != phaseIdle || m.cloud == nil || !m.cloud.epub {
+		return m, nil
+	}
+	if m.offer == nil {
+		return m.startRefresh()
+	}
+	cur := *m.offer
+	m.offer = nil
+	m.conflict = &cur
+	m.phase = phaseConflict
+	m.note = nil
+	m.setStatus(fmt.Sprintf("Cloud changed elsewhere (now %d%%); nothing sent", cur.percent), true)
+	return m, nil
+}
+
 // leave ends the session on q or esc. The place is saved on this device first.
-// Only then is it sent to Cloud. When Cloud cannot be updated, the session ends
-// with a notice that says why.
+// Only then is it sent to Cloud. Any Cloud read still in flight is ended first,
+// so its result cannot change the session. When Cloud cannot be updated, the
+// session ends with a notice that says why.
 func (m readerModel) leave() (tea.Model, tea.Cmd) {
 	if !m.saveLocal() {
 		return m, nil
 	}
+	m.invalidate()
+	m.note = nil
 	if m.cloud == nil {
 		return m, leaveCmd(m.bookHash, nil, "", false)
 	}
@@ -77,7 +157,7 @@ func (m readerModel) leave() (tea.Model, tea.Cmd) {
 		// read again only to confirm that it still holds that bookmark.
 		m.phase = phaseSyncing
 		m.setStatus("Checking Cloud…", false)
-		return m, confirmCmd(m.cloud)
+		return m, confirmCmd(m.cloud, m.cloudTimeout, m.reqID())
 	}
 	target, ok := m.target()
 	switch {
@@ -88,17 +168,19 @@ func (m readerModel) leave() (tea.Model, tea.Cmd) {
 	}
 	m.phase = phaseSyncing
 	m.setStatus("Syncing to Cloud…", false)
-	return m, syncCmd(m.cloud, target, m.cloud.baseline)
+	return m, syncCmd(m.cloud, target, m.cloud.baseline, m.cloudTimeout, m.reqID())
 }
 
 // onSync applies the result of an attempt to sync. A confirmed sync ends the
 // session. A changed Cloud position opens the conflict prompt. A failure opens
 // the failed prompt, and the local save stays.
 func (m readerModel) onSync(msg syncResultMsg) (tea.Model, tea.Cmd) {
-	if m.cloud == nil || msg.bookHash != m.bookHash {
+	if m.cloud == nil || msg.bookHash != m.bookHash || msg.req != m.reqID() {
 		return m, nil
 	}
 	m.phase = phaseIdle
+	m.note = nil
+	m.offer = nil
 	switch msg.outcome {
 	case syncConfirmed:
 		link := *m.cloud
@@ -119,11 +201,60 @@ func (m readerModel) onSync(msg syncResultMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// onRefresh applies the background read of Cloud. Only the current request is
+// applied, so a read that was cancelled or replaced is ignored. A position that
+// matches the baseline confirms it, and the reader keeps its place. A different
+// position is only offered: the reader does not move, and the baseline stays as
+// it was, so a later write is still checked against Cloud.
+func (m readerModel) onRefresh(msg refreshMsg) (tea.Model, tea.Cmd) {
+	if m.cloud == nil || msg.req != m.reqID() {
+		return m, nil
+	}
+	m.invalidate()
+	if msg.err != nil {
+		body, brief, help := refreshFailure(msg.err)
+		m.setNote(body, brief, help, true)
+		return m, nil
+	}
+	fresh := msg.cloud
+	if fresh.confirms(m.cloud.baseline) {
+		link := *m.cloud
+		link.baseline = fresh
+		m.cloud = &link
+		m.offer = nil
+		m.note = nil
+		m.setStatus("Cloud checked: position unchanged", false)
+		return m, nil
+	}
+	m.offer = &fresh
+	m.setNote("Cloud has another position. C:review", "Cloud moved. C:review",
+		"Cloud has another position. Nothing was moved or sent. C:review", false)
+	return m, nil
+}
+
+// refreshFailure says, in short and in full, why Cloud could not be read when a
+// session opened. Both say the saved position is still shown, and both name the
+// key that retries.
+func refreshFailure(err error) (body, brief, help string) {
+	if isTimeout(err) {
+		return "Cloud timed out. C:retry", "Cloud timed out. C:retry",
+			"Cloud timed out. Reading saved position. C:retry"
+	}
+	return "Cloud unavailable. C:retry", "Cloud error. C:retry",
+		fmt.Sprintf("Cloud unavailable (%v). Reading saved position. C:retry", err)
+}
+
+// isTimeout reports whether err is a request that ran out of time.
+func isTimeout(err error) bool {
+	var timeout interface{ Timeout() bool }
+	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout())
+}
+
 // onReload loads a Cloud position read again into the reader and makes it the
 // baseline. The place is saved on this device. An unlocatable Cloud position is
 // loaded as an estimate from its percentage, and is reported as one.
 func (m readerModel) onReload(msg cloudReloadMsg) (tea.Model, tea.Cmd) {
-	if m.cloud == nil || msg.bookHash != m.bookHash {
+	if m.cloud == nil || msg.bookHash != m.bookHash || msg.req != m.reqID() {
 		return m, nil
 	}
 	if msg.err != nil {
@@ -134,6 +265,8 @@ func (m readerModel) onReload(msg cloudReloadMsg) (tea.Model, tea.Cmd) {
 
 	m.phase = phaseIdle
 	m.conflict = nil
+	m.offer = nil
+	m.note = nil
 	m.content = msg.content
 	approx := msg.bm.Err != nil
 	if approx {
@@ -180,19 +313,22 @@ func (m readerModel) promptKey(key string) (readerModel, tea.Cmd, bool) {
 			m.setStatus("This passage has no exact EPUB location to send", true)
 			return m, nil, true
 		}
+		m.invalidate()
 		m.phase = phaseSyncing
 		m.setStatus("Overwriting Cloud with this passage…", false)
-		return m, syncCmd(m.cloud, target, *m.conflict), true
+		return m, syncCmd(m.cloud, target, *m.conflict, m.cloudTimeout, m.reqID()), true
 
 	case m.phase == phaseConflict && key == "c" && m.conflict != nil:
+		m.invalidate()
 		m.phase = phaseSyncing
 		m.setStatus("Loading the Cloud position…", false)
-		return m, reloadCmd(m.cloud, *m.conflict), true
+		return m, reloadCmd(m.cloud, *m.conflict, m.reqID()), true
 
 	case inPrompt && key == "l":
 		if !m.saveLocal() {
 			return m, nil, true
 		}
+		m.invalidate()
 		return m, leaveCmd(m.bookHash, nil, "Saved on this device only; Cloud was not updated", true), true
 
 	case m.phase == phaseFailed && key == "r":
@@ -219,7 +355,8 @@ const promptTextRows = 2
 // promptRows lists the open Cloud prompt within width and rows. The full
 // prompt is used when the body has room for it plus promptTextRows of text.
 // Otherwise a compact prompt keeps every action in view, with no blank row.
-// It is empty when no prompt is open.
+// With no prompt open, it lists the Cloud status instead. It is empty when there
+// is neither.
 func (m readerModel) promptRows(width, rows int) []string {
 	var full, compact []string
 	switch m.phase {
@@ -254,7 +391,7 @@ func (m readerModel) promptRows(width, rows int) []string {
 			"↵ keep reading",
 		}
 	default:
-		return nil
+		return m.cloudRows(width)
 	}
 	lines := compact
 	if width >= fullPromptWidth && len(full)+promptTextRows <= rows {
@@ -263,6 +400,31 @@ func (m readerModel) promptRows(width, rows int) []string {
 	out := make([]string, 0, len(lines))
 	for _, row := range lines {
 		out = append(out, mutedStyle.Render(truncate(row, width)))
+	}
+	return out
+}
+
+// cloudRows lists the Cloud status while no prompt is open. The body text is
+// used when it fits in cloudNoteRows rows, and the brief text otherwise, so the
+// key that acts on the status stays in view.
+func (m readerModel) cloudRows(width int) []string {
+	if m.note == nil {
+		return nil
+	}
+	rows := wrapText(m.note.body, width)
+	if len(rows) > cloudNoteRows {
+		rows = wrapText(m.note.brief, width)
+	}
+	if len(rows) > cloudNoteRows {
+		rows = rows[:cloudNoteRows]
+	}
+	render := mutedStyle.Render
+	if m.note.isErr {
+		render = errorStyle.Render
+	}
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, render(truncate(row, width)))
 	}
 	return out
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	pbc "github.com/micronull/pocketbook-cloud-client"
@@ -47,8 +48,18 @@ const (
 	syncFailed
 )
 
+// requestID names the request a reading session started. A result is applied
+// only while its request is still the session's current one. A late result from
+// an earlier session of the same book, or from a request that has since been
+// replaced or cancelled, is therefore ignored.
+type requestID struct {
+	session uint64 // the reading session that started the request
+	gen     uint64 // the request within that session
+}
+
 // syncResultMsg reports one attempt to bring Cloud to a target.
 type syncResultMsg struct {
+	req      requestID
 	bookHash string
 	outcome  syncOutcome
 	cloud    nativeProgress // the Cloud state as it was last read
@@ -60,9 +71,9 @@ type syncResultMsg struct {
 // expect, it changed elsewhere, and nothing is sent. Otherwise it sends the
 // target and reads it back. Only a read-back that matches counts as synced. The
 // check narrows the race between devices, but the API offers no compare-and-set,
-// so the race is not closed. There is no retry loop.
-func runSync(client *api.Client, token, bookHash string, target cloudTarget, expect nativeProgress) syncResultMsg {
-	ctx := context.Background()
+// so the race is not closed. Each native request is bounded by timeout. There is
+// no retry loop.
+func runSync(client *api.Client, token, bookHash string, target cloudTarget, expect nativeProgress, timeout time.Duration) syncResultMsg {
 	fail := func(err error) syncResultMsg {
 		return syncResultMsg{bookHash: bookHash, outcome: syncFailed, err: err}
 	}
@@ -73,36 +84,42 @@ func runSync(client *api.Client, token, bookHash string, target cloudTarget, exp
 		return syncResultMsg{bookHash: bookHash, outcome: syncConfirmed, cloud: cur}
 	}
 
-	cur, err := readCloud(client, token, bookHash)
+	cur, err := readCloud(context.Background(), timeout, client, token, bookHash)
 	if err != nil {
 		return fail(err)
 	}
 	switch {
 	case cur.holds(target):
 		return confirmed(cur)
-	case !cur.sameAs(expect):
+	case !cur.confirms(expect):
 		return changed(cur)
 	}
 
-	if err := client.SaveNativePosition(ctx, token, bookHash, target.percent, target.pointer); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	err = client.SaveNativePosition(ctx, token, bookHash, target.percent, target.pointer)
+	cancel()
+	if err != nil {
 		return fail(err)
 	}
-	got, err := readCloud(client, token, bookHash)
+	got, err := readCloud(context.Background(), timeout, client, token, bookHash)
 	if err != nil {
 		return fail(fmt.Errorf("could not confirm the Cloud position: %w", err))
 	}
 	switch {
 	case got.holds(target):
 		return confirmed(got)
-	case got.sameAs(expect):
+	case got.confirms(expect):
 		return fail(errors.New("Cloud did not keep the position"))
 	}
 	return changed(got)
 }
 
-// readCloud reads the account's current position for a book.
-func readCloud(client *api.Client, token, bookHash string) (nativeProgress, error) {
-	pos, err := client.NativePosition(context.Background(), token, bookHash)
+// readCloud reads the account's current position for a book. The read is
+// bounded by timeout, and ends early when parent is cancelled.
+func readCloud(parent context.Context, timeout time.Duration, client *api.Client, token, bookHash string) (nativeProgress, error) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	pos, err := client.NativePosition(ctx, token, bookHash)
 	if err != nil {
 		return nativeProgress{}, err
 	}
@@ -143,20 +160,40 @@ func (p nativeProgress) sameAs(other nativeProgress) bool {
 		p.percent == other.percent
 }
 
-// syncCmd runs runSync for a link in the background.
-func syncCmd(link *cloudLink, target cloudTarget, expect nativeProgress) tea.Cmd {
+// confirms reports whether p, a fresh read of Cloud, is the state base describes.
+// A complete base, one that carries pointer_pb, needs sameAs. A base without
+// pointer_pb was not read from a full snapshot, so that field cannot be compared.
+// Such a base is confirmed when the pointer and percentage match it and p's own
+// pointer_pb is the same CFI as p's pointer. A pointer_pb that differs from the
+// pointer is still a change.
+func (p nativeProgress) confirms(base nativeProgress) bool {
+	if base.pointerPb != "" {
+		return p.sameAs(base)
+	}
+	return normalizePointer(p.pointer) == normalizePointer(base.pointer) &&
+		p.percent == base.percent &&
+		normalizePointer(p.pointerPb) == normalizePointer(p.pointer)
+}
+
+// syncCmd runs runSync for a link in the background. The result carries req.
+func syncCmd(link *cloudLink, target cloudTarget, expect nativeProgress, timeout time.Duration, req requestID) tea.Cmd {
 	client, token, hash := link.client, link.token, link.bookHash
 	return func() tea.Msg {
-		return runSync(client, token, hash, target, expect)
+		msg := runSync(client, token, hash, target, expect, timeout)
+		msg.req = req
+		return msg
 	}
 }
 
 // confirmCmd reads Cloud once, in the background, for a session that leaves its
-// exact Cloud bookmark without moving. Nothing is sent. See runConfirm.
-func confirmCmd(link *cloudLink) tea.Cmd {
+// exact Cloud bookmark without moving. Nothing is sent. See runConfirm. The
+// result carries req.
+func confirmCmd(link *cloudLink, timeout time.Duration, req requestID) tea.Cmd {
 	client, token, hash, base := link.client, link.token, link.bookHash, link.baseline
 	return func() tea.Msg {
-		return runConfirm(client, token, hash, base)
+		msg := runConfirm(client, token, hash, base, timeout)
+		msg.req = req
+		return msg
 	}
 }
 
@@ -164,20 +201,25 @@ func confirmCmd(link *cloudLink) tea.Cmd {
 // percentage, and timestamp are kept as base has them, so the bookmark is never
 // regenerated from the reader's line. When Cloud holds anything else, nothing is
 // sent, and the change is reported as a conflict.
-func runConfirm(client *api.Client, token, bookHash string, base nativeProgress) syncResultMsg {
-	cur, err := readCloud(client, token, bookHash)
+func runConfirm(client *api.Client, token, bookHash string, base nativeProgress, timeout time.Duration) syncResultMsg {
+	cur, err := readCloud(context.Background(), timeout, client, token, bookHash)
 	switch {
 	case err != nil:
 		return syncResultMsg{bookHash: bookHash, outcome: syncFailed, err: err}
-	case cur.sameAs(base):
+	case cur.confirms(base):
+		// A base without pointer_pb takes the pointer_pb that Cloud just verified.
+		if base.pointerPb == "" {
+			base.pointerPb = cur.pointerPb
+		}
 		return syncResultMsg{bookHash: bookHash, outcome: syncConfirmed, cloud: base}
 	}
 	return syncResultMsg{bookHash: bookHash, outcome: syncChanged, cloud: cur}
 }
 
 // cloudReloadMsg carries the Cloud position read again into the book, for the
-// reader to load.
+// reader to load. req identifies the request that asked for it.
 type cloudReloadMsg struct {
+	req      requestID
 	bookHash string
 	cloud    nativeProgress
 	content  *reader.BookContent
@@ -186,11 +228,31 @@ type cloudReloadMsg struct {
 }
 
 // reloadCmd places the Cloud position in the cached book, in the background.
-func reloadCmd(link *cloudLink, cloud nativeProgress) tea.Cmd {
+func reloadCmd(link *cloudLink, cloud nativeProgress, req requestID) tea.Cmd {
 	reparse, hash := link.reparse, link.bookHash
 	return func() tea.Msg {
 		content, bm, err := reparse(cloud.pointer)
-		return cloudReloadMsg{bookHash: hash, cloud: cloud, content: content, bm: bm, err: err}
+		return cloudReloadMsg{req: req, bookHash: hash, cloud: cloud, content: content, bm: bm, err: err}
+	}
+}
+
+// refreshMsg reports the background read of Cloud that a reading session starts
+// when it opens. err is set when the read failed; otherwise cloud is the position
+// Cloud holds now.
+type refreshMsg struct {
+	req   requestID
+	cloud nativeProgress
+	err   error
+}
+
+// refreshCmd reads Cloud once, in the background. ctx belongs to the session, so
+// leaving the session, or starting another request, cancels the read. The read
+// is bounded by timeout. Nothing is written.
+func refreshCmd(ctx context.Context, link *cloudLink, timeout time.Duration, req requestID) tea.Cmd {
+	client, token, hash := link.client, link.token, link.bookHash
+	return func() tea.Msg {
+		cloud, err := readCloud(ctx, timeout, client, token, hash)
+		return refreshMsg{req: req, cloud: cloud, err: err}
 	}
 }
 

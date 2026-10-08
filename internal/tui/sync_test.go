@@ -42,9 +42,10 @@ type fakeCloud struct {
 	percent   int
 	updated   time.Time
 	posts     []fakePost
-	down      bool // GET and POST answer 503
-	failPost  bool // POST answers 500
-	dropPost  bool // POST answers OK but Cloud keeps the old position
+	down      bool          // GET and POST answer 503
+	failPost  bool          // POST answers 500
+	dropPost  bool          // POST answers OK but Cloud keeps the old position
+	gate      chan struct{} // while set, every request waits until it is closed
 }
 
 // newFakeCloud serves a Cloud that holds pos. client is wired to it.
@@ -64,6 +65,16 @@ func newFakeCloud(t *testing.T, pos pbc.BookReadPosition) *fakeCloud {
 }
 
 func (f *fakeCloud) serve(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	gate := f.gate
+	f.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-r.Context().Done():
+			return
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if r.Header.Get("Authorization") != "Bearer token" {
@@ -169,6 +180,18 @@ func (f *fakeCloud) setDown(down bool) {
 	f.down = down
 }
 
+// stall holds every request until the returned release func is called. A
+// request whose client gives up is dropped. Opening a book does not wait for
+// these requests, so a test uses stall to show that.
+func (f *fakeCloud) stall() (release func()) {
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.gate = gate
+	f.mu.Unlock()
+	var once sync.Once
+	return func() { once.Do(func() { close(gate) }) }
+}
+
 // drive runs each command and feeds its message back to the app, as the
 // Bubble Tea runtime does, until no command is left.
 func drive(app *App, cmd tea.Cmd) {
@@ -192,7 +215,8 @@ func openInApp(t *testing.T, cloud *fakeCloud, book pbc.Book) *App {
 		t.Fatalf("openBook: %v", msg.Err)
 	}
 	msg.Origin = screenLibrary
-	app.Update(msg)
+	_, cmd := app.Update(msg)
+	drive(app, cmd)
 	return app
 }
 
@@ -206,10 +230,10 @@ const (
 	cloudChapter8 = "#epubcfi(/6/16!/4/4/1)"
 )
 
-func TestOpeningReadsTheCloudPositionFresh(t *testing.T) {
+func TestOpeningUsesTheSavedCloudPositionWithoutAskingCloud(t *testing.T) {
 	isolateHome(t)
-	// The library snapshot says chapter twelve, but another device has since
-	// moved the account to chapter three.
+	// The library snapshot says chapter twelve. Another device has since moved
+	// the account to chapter three, but opening the book does not ask Cloud.
 	book := cacheDune(t, cloudAt())
 	cloud := newFakeCloud(t, pbc.BookReadPosition{Pointer: cloudChapter3, Percent: 5})
 
@@ -217,11 +241,8 @@ func TestOpeningReadsTheCloudPositionFresh(t *testing.T) {
 	if msg.Err != nil {
 		t.Fatalf("openBook: %v", msg.Err)
 	}
-	if msg.RefreshErr != nil {
-		t.Fatalf("fresh read failed: %v", msg.RefreshErr)
-	}
-	if msg.Cloud == nil || msg.Cloud.chapter != 2 || msg.Cloud.percent != 5 {
-		t.Fatalf("Cloud = %+v, want chapter index 2 at 5%%", msg.Cloud)
+	if msg.Cloud == nil || msg.Cloud.chapter != 11 || msg.Cloud.percent != 31 {
+		t.Fatalf("Cloud = %+v, want the saved chapter index 11 at 31%%", msg.Cloud)
 	}
 }
 
@@ -238,7 +259,7 @@ func TestOpeningKeepsTheLastKnownPositionWhenCloudIsUnreachable(t *testing.T) {
 	if got := readerOf(app).chapterIdx; got != 11 {
 		t.Fatalf("chapter = %d, want the last known Cloud chapter 11", got)
 	}
-	assertContains(t, app.View(), "not refreshed")
+	assertContains(t, app.View(), "Cloud unavailable")
 }
 
 func TestLeavingSavesLocallyThenSendsAndConfirmsCloud(t *testing.T) {

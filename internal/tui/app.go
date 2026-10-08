@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"fmt"
-
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -130,6 +128,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.cancelOpen(msg.open.Origin)
 		}
 		return a.enterReader(msg.open, &msg.chosen)
+
+	case refreshMsg:
+		// The background Cloud read belongs to the reader, which may no longer be
+		// showing. The reader's session check decides whether the result applies.
+		return a, update(&a.reader, msg)
 	}
 
 	return a, a.dispatch(msg)
@@ -201,23 +204,38 @@ func (a *App) showResumeChoice(msg OpenBookMsg, local, cloud resumePoint) (tea.M
 	return a, nil
 }
 
-// enterReader opens the reader at chosen, or at the beginning when chosen is nil.
-// It shows any notice about how the book was started.
-func (a *App) enterReader(msg OpenBookMsg, chosen *resumePoint) (tea.Model, tea.Cmd) {
+// newReaderSession builds the reader for a book that opened, at chosen, or at
+// the beginning when chosen is nil. It shows any notice about how the book was
+// started. Cloud is not read here; showReader starts that check.
+func newReaderSession(msg OpenBookMsg, chosen *resumePoint, width, height int) readerModel {
 	var pos *reader.Position
 	if chosen != nil {
 		pos = chosen.position(msg.BookHash)
 	}
-	r := newReaderModel(msg.Content, msg.BookHash, msg.BookTitle, pos, a.width, a.height)
+	r := newReaderModel(msg.Content, msg.BookHash, msg.BookTitle, pos, width, height)
 	r.attach(msg.Sync, chosen)
-	if msg.RefreshErr != nil {
-		r.setStatus(fmt.Sprintf("Cloud position not refreshed, using the last known state: %v", msg.RefreshErr), true)
-	} else if text, isErr := resumeNotice(msg, chosen); text != "" {
+	if text, isErr := resumeNotice(msg, chosen); text != "" {
 		r.setStatus(text, isErr)
 	}
+	return r
+}
+
+// enterReader opens the reader at chosen, or at the beginning when chosen is nil.
+func (a *App) enterReader(msg OpenBookMsg, chosen *resumePoint) (tea.Model, tea.Cmd) {
+	return a.showReader(newReaderSession(msg, chosen, a.width, a.height))
+}
+
+// showReader makes r the open reader and starts its background Cloud check. The
+// reader it replaces ends its requests first, so their results are ignored and
+// their reads are cancelled.
+func (a *App) showReader(r readerModel) (tea.Model, tea.Cmd) {
+	if old, ok := a.reader.(readerModel); ok {
+		old.invalidate()
+	}
+	r, cmd := r.startRefresh()
 	a.screen = screenReader
 	a.reader = r
-	return a, r.Init()
+	return a, cmd
 }
 
 // cancelOpen returns to the screen that started an open. Nothing is read or

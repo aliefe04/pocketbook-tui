@@ -16,8 +16,9 @@ import (
 // one the native web reader uses.
 const nativeBaseURL = "https://cloud.pocketbook.digital/api/v1.0/"
 
-// nativeTimeout bounds one native request, including reading its body.
-const nativeTimeout = 20 * time.Second
+// defaultNativeTimeout bounds one native request, including reading its body,
+// when the caller's context has no deadline. A caller's deadline is kept as given.
+const defaultNativeTimeout = 30 * time.Second
 
 // maxNativeBody bounds a native response. The endpoints answer in well under a
 // kilobyte, so anything larger is refused.
@@ -58,11 +59,12 @@ type nativeTransport struct {
 }
 
 // newNativeTransport returns a transport for base. A nil hc uses a client with
-// the default timeout. Either way the client refuses redirects, so the bearer
-// token cannot follow a redirect to another host.
+// no timeout of its own, so each request is bounded by its context. An injected
+// client keeps its own timeout. Either way the client refuses redirects, so the
+// bearer token cannot follow a redirect to another host.
 func newNativeTransport(base string, hc *http.Client) nativeTransport {
 	if hc == nil {
-		hc = &http.Client{Timeout: nativeTimeout}
+		hc = &http.Client{}
 	}
 	copied := *hc
 	copied.CheckRedirect = refuseRedirect
@@ -83,13 +85,17 @@ func (t nativeTransport) endpoint(fastHash string, segments ...string) (string, 
 }
 
 // send performs one request and returns its body. Any status other than 200 is
-// an *HTTPError. A nil body sends no request body.
+// an *HTTPError. A nil body sends no request body. A context with a deadline
+// keeps it; one without is bounded by defaultNativeTimeout.
 func (t nativeTransport) send(ctx context.Context, op, method, endpoint, token string, body []byte) ([]byte, error) {
 	if token == "" {
 		return nil, fmt.Errorf("%s: not signed in", op)
 	}
-	ctx, cancel := context.WithTimeout(ctx, nativeTimeout)
-	defer cancel()
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultNativeTimeout)
+		defer cancel()
+	}
 
 	var rd io.Reader
 	if body != nil {

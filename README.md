@@ -107,6 +107,7 @@ When Cloud and local positions differ, the TUI shows both sources and their save
 | `n` / `p` | Next / previous chapter |
 | `g` / `G` | Start / end of the chapter |
 | `?` | Show or hide the control list |
+| `C` | Check Cloud again, or review a changed Cloud position |
 | `q` / `esc` | Save locally and sync supported EPUB positions. Return after Cloud confirms |
 | `ctrl+c` | Quit without saving the position |
 
@@ -139,9 +140,15 @@ Small terminals show compact choices. The `↵` symbol means `enter`.
 
 ## Cloud synchronization
 
-Opening an EPUB requests its current Cloud bookmark, even when the library already holds an older one.
-If that request fails, the reader shows a warning and uses the last known bookmark or local save.
-Different Cloud and local positions produce a choice, with Cloud selected first.
+Opening a cached EPUB shows the last known Cloud bookmark or local save without waiting for the network.
+The reader checks Cloud in the background, with a 30-second deadline for each request.
+Different cached Cloud and local positions produce a choice, with Cloud selected first.
+
+If Cloud times out, reading stays available. Press `C` to retry.
+If Cloud reports another position, press `C` to review it.
+The refresh does not move you or send a position.
+
+The reader shows a short Cloud status above the text. Press `?` to see the full status.
 
 Leaving with `q` or `esc` saves locally, checks the current Cloud bookmark, then sends an exact EPUB location.
 The TUI reports `Synced to Cloud` only after a fresh read confirms both native pointers and the percentage.

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // nativeServer serves h and returns a client whose native endpoints are on it.
@@ -169,5 +170,22 @@ func TestSaveNativePositionRejectsPercentOutsideRange(t *testing.T) {
 		if err := c.SaveNativePosition(context.Background(), "tok", "HASH1", p, "#epubcfi(/6/2!/4/2/1:0)"); err == nil {
 			t.Errorf("percent %d was accepted", p)
 		}
+	}
+}
+
+func TestNativeRequestsKeepTheCallersDeadline(t *testing.T) {
+	c := nativeServer(t, func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := c.NativePosition(ctx, "tok", "HASH1")
+	if err == nil || !strings.Contains(err.Error(), "deadline exceeded") {
+		t.Fatalf("NativePosition error = %v, want the caller's deadline", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("request took %v, want it to end at the caller's 50ms deadline", elapsed)
 	}
 }

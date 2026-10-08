@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -33,16 +35,39 @@ type readerModel struct {
 	startLine    int  //
 	startApprox  bool // the start came from a percentage, not an exact location
 	startExact   bool // the start is an exact Cloud bookmark, kept unless the reader moves
+	// session identifies this reading session. Its requests carry it, so a result
+	// from another session of the same book is ignored.
+	session uint64
+	// gen counts the requests this session has started. Only the result of the
+	// current request is applied.
+	gen uint64
+	// cloudTimeout bounds each native request this session makes.
+	cloudTimeout time.Duration
+	// refreshing is true while the background Cloud read is in flight.
+	refreshing bool
+	// cancel ends the background Cloud read. It is nil when no read is in flight.
+	cancel context.CancelFunc
+	// offer is a Cloud position that differs from the session's baseline. It is
+	// not applied until the user reviews it with C.
+	offer *nativeProgress
+	// note is the Cloud status, or nil when there is none.
+	note *cloudStatus
 }
+
+// readerSessions numbers reading sessions, so that results can be matched to
+// the session that started them.
+var readerSessions atomic.Uint64
 
 func newReaderModel(content *reader.BookContent, bookHash, bookTitle string, pos *reader.Position, width, height int) readerModel {
 	m := readerModel{
-		content:   content,
-		bookHash:  bookHash,
-		bookTitle: bookTitle,
-		width:     width,
-		height:    height,
-		ready:     width > 0 && height > 0,
+		content:      content,
+		bookHash:     bookHash,
+		bookTitle:    bookTitle,
+		width:        width,
+		height:       height,
+		ready:        width > 0 && height > 0,
+		session:      readerSessions.Add(1),
+		cloudTimeout: defaultCloudTimeout,
 	}
 
 	if pos != nil {
@@ -111,6 +136,9 @@ func (m readerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case cloudReloadMsg:
 		return m.onReload(msg)
 
+	case refreshMsg:
+		return m.onRefresh(msg)
+
 	case tea.KeyMsg:
 		// While a request is in flight, only ctrl+c is accepted.
 		if m.phase == phaseSyncing && msg.String() != "ctrl+c" {
@@ -131,6 +159,8 @@ func (m readerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "?":
 			m.showHelp = !m.showHelp
 			return m, nil
+		case "C":
+			return m.reviewCloud()
 
 		case "j", "down":
 			m.scrollDown(1)
@@ -435,8 +465,12 @@ func (m readerModel) View() string {
 
 func (m readerModel) helpView() string {
 	w, h := termSize(m.width, m.height)
-	lines := []string{
-		"READER CONTROLS",
+	inner := max(w-4, 1)
+	lines := []string{"READER CONTROLS"}
+	if m.note != nil && m.note.help != "" {
+		lines = append(lines, wrapText(m.note.help, inner)...)
+	}
+	lines = append(lines,
 		"j/k ↓/↑        line down / up",
 		"d/u PgDn/PgUp  page down / up",
 		"f/space        next page",
@@ -447,9 +481,9 @@ func (m readerModel) helpView() string {
 		"q / esc        save here, sync to Cloud, back to library",
 		"o c l enter    Cloud conflict: overwrite, load Cloud, keep here, keep reading",
 		"r l enter      failed sync: retry, keep here, keep reading",
+		"C              Cloud: review a changed position, or check again",
 		"ctrl+c         quit without saving",
-	}
-	inner := max(w-4, 1)
+	)
 	for i, line := range lines {
 		lines[i] = truncate(line, inner)
 	}
@@ -480,9 +514,6 @@ type OpenBookMsg struct {
 	PositionSavedAt time.Time
 	Cloud           *resumePoint
 	CloudErr        error
-	// RefreshErr says why the Cloud position could not be read again. The
-	// library's snapshot is used in its place.
-	RefreshErr error
 	// Sync is the book's Cloud link, or nil when the book has none.
 	Sync   *cloudLink
 	Err    error
