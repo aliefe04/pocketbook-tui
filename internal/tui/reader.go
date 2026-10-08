@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -11,16 +12,27 @@ import (
 )
 
 type readerModel struct {
-	content      *reader.BookContent
-	bookHash     string
-	bookTitle    string
-	chapterIdx   int
-	lineOffset   int
-	width        int
-	height       int
-	ready        bool
-	statusMsg    string
-	showHelp     bool
+	content       *reader.BookContent
+	bookHash      string
+	bookTitle     string
+	chapterIdx    int
+	lineOffset    int
+	width         int
+	height        int
+	ready         bool
+	statusMsg     string
+	statusIsError bool
+	showHelp      bool
+	// cloud is the book's Cloud link, or nil when the reader has none, as for
+	// fixtures and tests. Nothing is sent to Cloud without it.
+	cloud        *cloudLink
+	phase        syncPhase
+	conflict     *nativeProgress // Cloud state that differs from the session's baseline
+	syncErr      error
+	startChapter int  // where the session began, for the start rules
+	startLine    int  //
+	startApprox  bool // the start came from a percentage, not an exact location
+	startExact   bool // the start is an exact Cloud bookmark, kept unless the reader moves
 }
 
 func newReaderModel(content *reader.BookContent, bookHash, bookTitle string, pos *reader.Position, width, height int) readerModel {
@@ -35,7 +47,8 @@ func newReaderModel(content *reader.BookContent, bookHash, bookTitle string, pos
 
 	if pos != nil {
 		// Apply legacy v0 -> v1 migration if needed (shifts lineOffset by
-		// the chapter's title height so it still points at the same body line).
+		// the chapter's title height so it still points at the same body
+		// line).
 		pos.ApplyMigration(content)
 		if pos.ChapterIndex < len(content.Chapters) {
 			m.chapterIdx = pos.ChapterIndex
@@ -79,7 +92,10 @@ func (m readerModel) Init() tea.Cmd {
 	return nil
 }
 
-type savePositionMsg struct{}
+func (m *readerModel) setStatus(msg string, isErr bool) {
+	m.statusMsg = msg
+	m.statusIsError = isErr
+}
 
 func (m readerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -89,10 +105,28 @@ func (m readerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ready = true
 		return m, nil
 
+	case syncResultMsg:
+		return m.onSync(msg)
+
+	case cloudReloadMsg:
+		return m.onReload(msg)
+
 	case tea.KeyMsg:
+		// While a request is in flight, only ctrl+c is accepted.
+		if m.phase == phaseSyncing && msg.String() != "ctrl+c" {
+			return m, nil
+		}
+		if next, cmd, ok := m.promptKey(msg.String()); ok {
+			return next, cmd
+		}
 		switch msg.String() {
 		case "q", "esc":
-			return m, m.savePosition()
+			return m.leave()
+
+		case "ctrl+c":
+			// Explicit escape hatch for when saving keeps failing: quit
+			// without saving the position.
+			return m, tea.Quit
 
 		case "?":
 			m.showHelp = !m.showHelp
@@ -118,11 +152,6 @@ func (m readerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.goToChapterStart()
 		case "G":
 			m.goToChapterEnd()
-		}
-
-	case savePositionMsg:
-		return m, func() tea.Msg {
-			return BackToLibraryMsg{}
 		}
 	}
 
@@ -221,34 +250,22 @@ func (m *readerModel) pageSize() int {
 		return 20 // Default until we know terminal size
 	}
 	// header(1) + top rule(1) + bottom rule(1) + footer(1) = 4 chrome lines.
-	// Body area holds the rest. Chapter title chrome lives inside the virtual
-	// flow, so no special casing is needed here.
-	ps := m.height - 4
-	if ps < 5 {
-		ps = 5
-	}
-	return ps
+	// The body holds exactly the rows left over, as frame shows them. Chapter
+	// title chrome lives inside the virtual flow, so no special casing is needed.
+	return max(m.height-4, 1)
 }
-
-// minReaderWidth is the minimum terminal width for a usable reading experience.
-const minReaderWidth = 20
 
 func (m *readerModel) percent() int {
 	return reader.CalculatePercent(m.content, m.chapterIdx, m.lineOffset)
 }
 
-func (m *readerModel) savePosition() tea.Cmd {
-	pos := &reader.Position{
+// position is the reading position to save: the current chapter and line.
+func (m *readerModel) position() *reader.Position {
+	return &reader.Position{
 		BookHash:     m.bookHash,
 		ChapterIndex: m.chapterIdx,
 		LineOffset:   m.lineOffset,
 		Percent:      m.percent(),
-	}
-	if err := reader.SavePosition(pos); err != nil {
-		m.statusMsg = fmt.Sprintf("Save error: %v", err)
-	}
-	return func() tea.Msg {
-		return savePositionMsg{}
 	}
 }
 
@@ -258,70 +275,48 @@ func (m readerModel) View() string {
 	}
 
 	if !m.ready {
-		return "Loading..."
+		return mutedStyle.Render("Loading…")
 	}
 
-	// Terminal too small
-	if m.width < minReaderWidth || m.height < 8 {
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
-			ErrorStyle.Render("Terminal too small. Please resize to at least 20x8."))
-	}
-
-	if m.content == nil || len(m.content.Chapters) == 0 {
-		return lipgloss.JoinVertical(lipgloss.Left,
-			TitleStyle.Render("PocketBook Reader"),
-			BoxStyle.Render(
-				lipgloss.JoinVertical(lipgloss.Left,
-					ErrorStyle.Render("Error: Book has no readable content"),
-					"The book could not be parsed. It may be DRM-protected or in an unsupported format.",
-				),
-			),
-			HelpStyle.Render("q: quit"),
-		)
-	}
-
-	ch := m.currentChapter()
-	if ch == nil {
-		return "No content available"
+	if tooSmall(m.width, m.height) {
+		return tooSmallView(m.width, m.height)
 	}
 
 	W := m.width
 	H := m.height
 
+	if m.content == nil || len(m.content.Chapters) == 0 {
+		header := []string{titleRow(W, "PocketBook Reader", "")}
+		body := []string{
+			"",
+			errorStyle.Render("  Error: Book has no readable content"),
+		}
+		for _, line := range wrapText("The book could not be parsed. It may be DRM-protected or in an unsupported format.", W-2) {
+			body = append(body, mutedStyle.Render("  "+line))
+		}
+		footer := []string{"", hintLine(W, keyHint{"q", "quit"})}
+		return frame(W, H, header, body, footer)
+	}
+
+	ch := m.currentChapter()
+	if ch == nil {
+		return mutedStyle.Render("No content available")
+	}
+
 	// Reading column: cap at a comfortable width, center it.
-	contentW := W - 4
-	if contentW > 72 {
-		contentW = 72
-	}
-	if contentW < 10 {
-		contentW = 10
-	}
-	leftMargin := (W - contentW) / 2
-	if leftMargin < 0 {
-		leftMargin = 0
-	}
+	contentW := min(max(W-4, 10), 72)
+	leftMargin := max((W-contentW)/2, 0)
 
 	// Body area = terminal minus header(1) + top rule(1) + bottom rule(1) + footer(1)
-	pageSize := H - 4
-	if pageSize < 5 {
-		pageSize = 5
-	}
+	pageSize := m.pageSize()
 
 	// ── Header: book title (left) + percent (right), dim & calm ─────────────
-	percent := m.percent()
-	percentStr := fmt.Sprintf("%d%%", percent)
-	bookTitle := truncate(m.bookTitle, contentW)
-	headerLeft := lipgloss.NewStyle().Foreground(DimColor).Render(bookTitle)
-	headerRight := lipgloss.NewStyle().Foreground(DimColor).Render(percentStr)
-	spacerW := W - lipgloss.Width(headerLeft) - lipgloss.Width(headerRight)
-	if spacerW < 0 {
-		spacerW = 0
-	}
-	header := lipgloss.JoinHorizontal(lipgloss.Left,
-		headerLeft,
-		lipgloss.NewStyle().Width(spacerW).Render(""),
-		headerRight,
-	)
+	pct := fmt.Sprintf("%d%%", m.percent())
+	title := truncate(m.bookTitle, max(W-len(pct)-1, 0))
+	header := readDim.Render(title) +
+		strings.Repeat(" ", max(W-lipgloss.Width(title)-len(pct), 0)) +
+		readDim.Render(pct)
+	rule := readDim.Render(strings.Repeat("─", W))
 
 	// ── Body: virtual flow render ───────────────────────────────────────────
 	// The virtual flow is: [title chrome (titleHeight lines)] [body lines].
@@ -329,7 +324,7 @@ func (m readerModel) View() string {
 	// lineOffset, mixing title chrome and body lines as needed.
 	titleH := ch.TitleHeight()
 	bodyCount := len(ch.Lines)
-	virtualCount := titleH + bodyCount
+	blankRow := lipgloss.NewStyle().Width(contentW).Render("")
 
 	var pieces []string
 	added := 0
@@ -340,46 +335,34 @@ func (m readerModel) View() string {
 		pieces = append(pieces, s)
 		added++
 	}
+	prompt := m.promptRows(contentW, pageSize)
+	for _, row := range prompt {
+		emit(row)
+	}
+	promptLen := len(pieces)
 
 	// Title chrome — shown when the viewport overlaps the title region.
 	if titleH > 0 {
 		// Title line
 		if m.lineOffset <= 0 {
 			titleText := truncate(strings.TrimSpace(ch.Title), contentW-4)
-			emit(lipgloss.NewStyle().
-				Width(contentW).
-				Align(lipgloss.Center).
-				Bold(true).
-				Foreground(ChapterColor).
-				Render(titleText))
-		} else {
-			// Skip past this virtual line
+			emit(readChapter.Width(contentW).Align(lipgloss.Center).Render(titleText))
 		}
 
 		// Decorative rule under the title
 		if m.lineOffset <= 1 && added < pageSize {
-			runeCount := len([]rune(strings.TrimSpace(ch.Title))) + 4
-			if runeCount > contentW {
-				runeCount = contentW
-			}
-			emit(lipgloss.NewStyle().
-				Width(contentW).
-				Align(lipgloss.Center).
-				Foreground(ReadingDimColor).
-				Render(strings.Repeat("═", runeCount)))
+			runeCount := min(lipgloss.Width(strings.TrimSpace(ch.Title))+4, contentW)
+			emit(readDim.Width(contentW).Align(lipgloss.Center).Render(strings.Repeat("═", runeCount)))
 		}
 
 		// Blank separator
 		if m.lineOffset <= 2 && added < pageSize {
-			emit(lipgloss.NewStyle().Width(contentW).Render(""))
+			emit(blankRow)
 		}
 	}
 
 	// Body lines — start at max(0, lineOffset - titleH) in body index.
-	bodyStart := m.lineOffset - titleH
-	if bodyStart < 0 {
-		bodyStart = 0
-	}
+	bodyStart := max(m.lineOffset-titleH, 0)
 	prevBlank := false
 	emptyPage := titleH == 0 // if title shows, page isn't "empty"
 	for i := bodyStart; i < bodyCount && added < pageSize; i++ {
@@ -389,145 +372,119 @@ func (m readerModel) View() string {
 				continue
 			}
 			prevBlank = true
-			emit(lipgloss.NewStyle().Width(contentW).Render(""))
+			emit(blankRow)
 			continue
 		}
 		prevBlank = false
 		emptyPage = false
-		wrapped := reader.WrapLine(line, contentW)
-		for _, w := range wrapped {
+		for _, w := range reader.WrapLine(line, contentW) {
 			if added >= pageSize {
 				break
 			}
-			emit(lipgloss.NewStyle().
-				Width(contentW).
-				Foreground(ReadingColor).
-				Render(w))
+			emit(readText.Width(contentW).Render(w))
 		}
 	}
 
 	// End markers
-	if emptyPage && added > 0 && bodyStart >= bodyCount-1 {
-		isLast := m.chapterIdx >= len(m.content.Chapters)-1
+	if emptyPage && len(pieces) > promptLen && bodyStart >= bodyCount-1 {
 		label := "(end of chapter)"
-		if isLast {
+		if m.chapterIdx >= len(m.content.Chapters)-1 {
 			label = "(end of book)"
 		}
-		pieces[len(pieces)-1] = lipgloss.NewStyle().
-			Width(contentW).
-			Align(lipgloss.Center).
-			Foreground(ReadingDimColor).
-			Render(label)
+		pieces[len(pieces)-1] = readDim.Width(contentW).Align(lipgloss.Center).Render(label)
 	}
 
 	// Fill remaining space
 	for added < pageSize {
-		pieces = append(pieces, lipgloss.NewStyle().Width(contentW).Render(""))
+		pieces = append(pieces, blankRow)
 		added++
 	}
 
 	body := lipgloss.JoinVertical(lipgloss.Left, pieces...)
 	body = lipgloss.NewStyle().MarginLeft(leftMargin).Render(body)
 
-	_ = virtualCount // currently only used implicitly via added/bodyStart
-
-	// ── Footer: chapter info (left) + help hint (right), dim ────────────────
+	// ── Footer: chapter info (left) + status or help hint (right), dim ──────
 	chTitle := strings.TrimSpace(ch.Title)
-	maxChTitleW := contentW - 16
-	if maxChTitleW < 5 {
-		maxChTitleW = 5
-	}
 	if chTitle != "" {
-		chTitle = truncate(chTitle, maxChTitleW)
+		chTitle = truncate(chTitle, max(contentW-16, 5))
 	}
-	var leftInfo string
+	leftInfo := fmt.Sprintf("Ch %d/%d", m.chapterIdx+1, len(m.content.Chapters))
 	if chTitle != "" {
-		leftInfo = fmt.Sprintf("Ch %d/%d · %s", m.chapterIdx+1, len(m.content.Chapters), chTitle)
-	} else {
-		leftInfo = fmt.Sprintf("Ch %d/%d", m.chapterIdx+1, len(m.content.Chapters))
+		leftInfo += " · " + chTitle
 	}
-	footLeft := lipgloss.NewStyle().Foreground(ReadingDimColor).Render(leftInfo)
-	footRightStr := "?:help · q:quit"
-	spacerF := W - lipgloss.Width(footLeft) - len([]rune(footRightStr))
-	// If no room for spacer, truncate the help hint
-	if spacerF < 0 {
-		avail := W - lipgloss.Width(footLeft) - 2
-		if avail < 0 {
-			avail = 0
-		}
-		footRightStr = truncate(footRightStr, avail)
-		spacerF = W - lipgloss.Width(footLeft) - len([]rune(footRightStr))
-		if spacerF < 0 {
-			spacerF = 0
+	leftInfo = truncate(leftInfo, W)
+
+	rightInfo := "?:help · q:quit"
+	rightStyle := readDim
+	if m.statusMsg != "" {
+		rightInfo = m.statusMsg
+		if m.statusIsError {
+			rightStyle = errorStyle
 		}
 	}
-	footRight := lipgloss.NewStyle().Foreground(ReadingDimColor).Render(footRightStr)
-	footer := lipgloss.JoinHorizontal(lipgloss.Left,
-		footLeft,
-		lipgloss.NewStyle().Width(spacerF).Render(""),
-		footRight,
-	)
+	rightInfo = truncate(rightInfo, max(W-lipgloss.Width(leftInfo)-1, 0))
+	gap := max(W-lipgloss.Width(leftInfo)-lipgloss.Width(rightInfo), 0)
+	footer := readDim.Render(leftInfo) + strings.Repeat(" ", gap) + rightStyle.Render(rightInfo)
 
-	// Thin sepia rules between chrome and body
-	rule := lipgloss.NewStyle().Foreground(ReadingDimColor).Render(strings.Repeat("─", W))
-
-	return lipgloss.JoinVertical(lipgloss.Left,
-		header,
-		rule,
-		body,
-		rule,
-		footer,
+	return frame(W, H,
+		[]string{header, rule},
+		strings.Split(body, "\n"),
+		[]string{rule, footer},
 	)
 }
 
 func (m readerModel) helpView() string {
-	help := []string{
-		"",
-		"  READER CONTROLS",
-		"",
-		"  j/↓     Scroll down 1 line",
-		"  k/↑     Scroll up 1 line",
-		"  d/PgDn  Scroll down 1 page",
-		"  u/PgUp  Scroll up 1 page",
-		"  f/space Next page",
-		"  b       Previous page",
-		"  n       Next chapter",
-		"  p       Previous chapter",
-		"  g       Go to chapter start",
-		"  G       Go to chapter end",
-		"  ?       Toggle this help",
-		"  q/esc   Quit and save position",
-		"",
+	w, h := termSize(m.width, m.height)
+	lines := []string{
+		"READER CONTROLS",
+		"j/k ↓/↑        line down / up",
+		"d/u PgDn/PgUp  page down / up",
+		"f/space        next page",
+		"b              previous page",
+		"n / p          next / previous chapter",
+		"g / G          chapter start / end",
+		"?              toggle this help",
+		"q / esc        save here, sync to Cloud, back to library",
+		"o c l enter    Cloud conflict: overwrite, load Cloud, keep here, keep reading",
+		"r l enter      failed sync: retry, keep here, keep reading",
+		"ctrl+c         quit without saving",
 	}
-
-	helpW := m.width - 4
-	if helpW < 30 {
-		helpW = 30
+	inner := max(w-4, 1)
+	for i, line := range lines {
+		lines[i] = truncate(line, inner)
 	}
-
-	helpContent := strings.Join(help, "\n")
-
-	if m.width > 0 && m.height > 0 {
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
-			lipgloss.NewStyle().
-				Width(helpW).
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(BorderColor).
-				Render(helpContent))
-	}
-
-	return lipgloss.NewStyle().
-		Width(helpW).
+	box := lipgloss.NewStyle().
+		Foreground(colorText).
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(BorderColor).
-		Render(helpContent)
+		BorderForeground(colorFaint).
+		Padding(0, 1).
+		Render(strings.Join(lines, "\n"))
+	box = clipRows(box, h)
+	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, box)
 }
 
-// OpenBookMsg is sent to open a book in the reader.
+// OpenBookMsg is sent to open a book in the reader. Err is set when the book
+// could not be opened. Origin is the screen that started the open. A failed
+// open goes back to that screen.
+//
+// Position is the local saved position, with any legacy migration applied.
+// PositionErr is set when that position exists but cannot be read. Cloud is the
+// account's reading position placed in Content, or nil when there is none or it
+// cannot be placed at all. CloudErr says why Cloud is approximate or missing.
 type OpenBookMsg struct {
-	Content   *reader.BookContent
-	BookHash  string
-	BookTitle string
-	Position  *reader.Position
-	Err       error
+	Content         *reader.BookContent
+	BookHash        string
+	BookTitle       string
+	Position        *reader.Position
+	PositionErr     error
+	PositionSavedAt time.Time
+	Cloud           *resumePoint
+	CloudErr        error
+	// RefreshErr says why the Cloud position could not be read again. The
+	// library's snapshot is used in its place.
+	RefreshErr error
+	// Sync is the book's Cloud link, or nil when the book has none.
+	Sync   *cloudLink
+	Err    error
+	Origin screen
 }

@@ -3,9 +3,11 @@ package tui
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
+	"slices"
 	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -16,7 +18,15 @@ import (
 	"github.com/aliefe/pocketbook-tui/internal/reader"
 )
 
+// libraryChromeRows is the number of rows the library uses outside the book
+// list: title, filter, a blank row, status, and key hints.
+const libraryChromeRows = 5
+
+// bookRowHeight is the number of terminal rows one book takes in the list.
+const bookRowHeight = 2
+
 type libraryModel struct {
+	fetched       []pbc.Book // as the server listed them, the input to each reorder
 	books         []pbc.Book
 	filteredBooks []pbc.Book
 	client        *api.Client
@@ -50,14 +60,6 @@ type booksLoadedMsg struct {
 	err   error
 }
 
-type downloadProgressMsg struct {
-	bookTitle string
-	done      bool
-	err       error
-}
-
-
-
 func (m libraryModel) loadBooks() tea.Cmd {
 	return func() tea.Msg {
 		books, err := m.client.Books(context.Background(), m.cfg.Token, 9999, 0)
@@ -70,64 +72,35 @@ func (m libraryModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.adjustScroll()
 		return m, nil
 
 	case tea.KeyMsg:
 		if m.filterMode {
-			return m.handleFilterInput(msg)
+			return m.handleFilterKey(msg)
 		}
+		return m.handleKey(msg)
 
-		switch msg.String() {
-		case "q", "esc":
-			return m, tea.Quit
-
-		case "R":
-			m.loading = true
-			m.statusMsg = ""
-			return m, m.loadBooks()
-
-		case "L":
-			m.cfg.ClearAuth()
-			m.cfg.Save()
-			return m, func() tea.Msg {
-				return UnauthorizedMsg{}
-			}
-
-		case "j", "down":
-			m.cursorDown()
-		case "k", "up":
-			m.cursorUp()
-
-		case "d":
-			if len(m.filteredBooks) > 0 && m.cursor < len(m.filteredBooks) {
-				return m, m.downloadBook(m.filteredBooks[m.cursor])
-			}
-
-		case "r":
-			if len(m.filteredBooks) > 0 && m.cursor < len(m.filteredBooks) {
-				m.statusMsg = fmt.Sprintf("Opening: %s...", m.filteredBooks[m.cursor].Title)
-				return m, m.openBook(m.filteredBooks[m.cursor])
-			}
-
-		case "enter":
-			if len(m.filteredBooks) > 0 && m.cursor < len(m.filteredBooks) {
-				return m, func() tea.Msg {
-					return ShowDetailMsg{Book: m.filteredBooks[m.cursor]}
-				}
-			}
-
-		case "/":
-			m.filterMode = true
-			m.filter = ""
-			m.applyFilter()
-			return m, nil
+	case BackToLibraryMsg:
+		// Returning from the reader or details: drop a finished "Opening" status,
+		// but keep an error so a failed open is still shown. A save may have made
+		// a book the most recent read, so the list is ordered again.
+		if !m.statusIsError {
+			m.setStatus("", false)
 		}
+		m.setBooks(m.fetched)
+		return m, nil
+
+	case openCancelledMsg:
+		if !m.statusIsError {
+			m.setStatus("", false)
+		}
+		return m, nil
 
 	case booksLoadedMsg:
 		m.loading = false
 		if msg.err != nil {
-			m.err = msg.err
-			// Check for 401 Unauthorized - token expired
+			// A 401 means the stored token is no longer valid.
 			if isUnauthorized(msg.err) {
 				m.cfg.ClearAuth()
 				m.cfg.Save()
@@ -135,48 +108,109 @@ func (m libraryModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return UnauthorizedMsg{}
 				}
 			}
-			m.statusMsg = fmt.Sprintf("Error: %v", msg.err)
-			m.statusIsError = true
+			m.err = msg.err
+			if len(m.books) > 0 {
+				m.setStatus(fmt.Sprintf("Refresh failed: %v", msg.err), true)
+			}
 			return m, nil
 		}
-		m.books = msg.books.Books
-		m.filteredBooks = m.books
-		m.cursor = 0
-		m.scrollOffset = 0
-		m.statusMsg = fmt.Sprintf("%d books", len(m.books))
-		m.statusIsError = false
-		return m, nil
-
-	case downloadProgressMsg:
-		if msg.err != nil {
-			m.statusMsg = fmt.Sprintf("Download failed: %v", msg.err)
-			m.statusIsError = true
-		} else if msg.done {
-			m.statusMsg = fmt.Sprintf("Downloaded: %s", msg.bookTitle)
-			m.statusIsError = false
-		}
+		m.err = nil
+		m.setStatus("", false)
+		m.setBooks(msg.books.Books)
 		return m, nil
 
 	case OpenBookMsg:
+		// Successful opens never reach this screen; the App switches to the reader.
 		if msg.Err != nil {
-			m.statusMsg = fmt.Sprintf("Open failed: %v", msg.Err)
-			m.statusIsError = true
-			return m, nil
+			m.setStatus(fmt.Sprintf("Open failed: %v", msg.Err), true)
 		}
-		return m, func() tea.Msg {
-			return OpenBookMsg{
-				Content:   msg.Content,
-				BookHash:  msg.BookHash,
-				BookTitle: msg.BookTitle,
-				Position:  msg.Position,
-			}
+		return m, nil
+
+	case readerLeftMsg:
+		// The reader's session ended. Its notice replaces the status, and a
+		// confirmed Cloud state updates the book's progress. The list is ordered
+		// again, because the book may now be the most recently read.
+		m.setStatus(msg.notice, msg.noticeErr)
+		if msg.confirmed != nil {
+			m.applyConfirmed(msg.bookHash, *msg.confirmed)
 		}
+		m.setBooks(m.fetched)
+		return m, nil
+
+	case downloadProgressMsg:
+		m.showDownloadResult(msg)
+		return m, nil
 	}
 
 	return m, nil
 }
 
-func (m *libraryModel) handleFilterInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *libraryModel) setStatus(msg string, isErr bool) {
+	m.statusMsg = msg
+	m.statusIsError = isErr
+}
+
+func (m *libraryModel) showDownloadResult(msg downloadProgressMsg) {
+	switch {
+	case msg.err != nil:
+		m.setStatus(fmt.Sprintf("Download failed: %v", msg.err), true)
+	case msg.done:
+		m.setStatus(fmt.Sprintf("Downloaded: %s", displayTitle(msg.bookTitle)), false)
+	}
+}
+
+func (m libraryModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc", "ctrl+c":
+		return m, tea.Quit
+
+	case "R":
+		m.loading = true
+		m.setStatus("", false)
+		return m, m.loadBooks()
+
+	case "L":
+		m.cfg.ClearAuth()
+		m.cfg.Save()
+		return m, func() tea.Msg {
+			return UnauthorizedMsg{}
+		}
+
+	case "j", "down":
+		m.cursorDown()
+
+	case "k", "up":
+		m.cursorUp()
+
+	case "d":
+		if book, ok := m.selectedBook(); ok {
+			m.setStatus("Downloading "+displayTitle(book.Title)+"…", false)
+			return m, downloadBookCmd(m.client, book)
+		}
+
+	case "r":
+		if book, ok := m.selectedBook(); ok {
+			m.setStatus("Opening "+displayTitle(book.Title)+"…", false)
+			return m, openBookCmd(m.client, m.cfg.Token, book, screenLibrary)
+		}
+
+	case "enter":
+		if book, ok := m.selectedBook(); ok {
+			return m, func() tea.Msg {
+				return ShowDetailMsg{Book: book}
+			}
+		}
+
+	case "/":
+		m.filterMode = true
+		m.filter = ""
+		m.applyFilter()
+	}
+
+	return m, nil
+}
+
+func (m libraryModel) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "/":
 		m.filterMode = false
@@ -186,45 +220,161 @@ func (m *libraryModel) handleFilterInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.filterMode = false
 		return m, nil
 	case "backspace":
-		if len(m.filter) > 0 {
-			m.filter = m.filter[:len(m.filter)-1]
-			m.applyFilter()
-		}
-		return m, nil
-	default:
-		if len(msg.String()) == 1 {
-			m.filter += msg.String()
-			m.applyFilter()
-		}
+		m.filter = dropLastRune(m.filter)
+		m.applyFilter()
 		return m, nil
 	}
+
+	switch msg.Type {
+	case tea.KeySpace:
+		m.filter += " "
+	case tea.KeyRunes:
+		// Covers typed Unicode and pasted text; control characters are dropped.
+		m.filter += printableRunes(msg.Runes)
+	default:
+		return m, nil
+	}
+	m.applyFilter()
+	return m, nil
 }
 
-func (m *libraryModel) applyFilter() {
-	if m.filter == "" {
-		m.filteredBooks = m.books
-	} else {
-		var filtered []pbc.Book
-		lowerFilter := strings.ToLower(m.filter)
-		for _, b := range m.books {
-			if strings.Contains(strings.ToLower(b.Title), lowerFilter) ||
-				strings.Contains(strings.ToLower(b.MetaData.Authors), lowerFilter) {
-				filtered = append(filtered, b)
-			}
-		}
-		m.filteredBooks = filtered
+// dropLastRune removes the last whole character, not the last byte.
+func dropLastRune(s string) string {
+	if s == "" {
+		return s
 	}
+	_, size := utf8.DecodeLastRuneInString(s)
+	return s[:len(s)-size]
+}
+
+// printableRunes returns the printable characters from runes.
+func printableRunes(runes []rune) string {
+	var b strings.Builder
+	for _, r := range runes {
+		if unicode.IsPrint(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// filterBooks returns the books whose title or authors contain query, ignoring
+// case. An empty query returns all books.
+func filterBooks(books []pbc.Book, query string) []pbc.Book {
+	if query == "" {
+		return books
+	}
+	needle := strings.ToLower(query)
+	var out []pbc.Book
+	for _, b := range books {
+		if strings.Contains(strings.ToLower(b.Title), needle) ||
+			strings.Contains(strings.ToLower(b.MetaData.Authors), needle) {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// applyFilter recomputes the visible books for the current filter and moves
+// the selection back to the top. It runs when the filter text changes.
+func (m *libraryModel) applyFilter() {
+	m.filteredBooks = filterBooks(m.books, m.filter)
 	m.cursor = 0
 	m.scrollOffset = 0
 }
 
-func (m *libraryModel) cursorDown() {
-	if len(m.filteredBooks) == 0 {
-		return
+// setBooks replaces the book list with fetched, ordered by recent reading. The
+// selection stays on the same book when that book is still listed. Otherwise it
+// keeps its index, clamped to the list. The filter text is kept.
+func (m *libraryModel) setBooks(fetched []pbc.Book) {
+	prev, hadSelection := m.selectedBook()
+	m.fetched = fetched
+	m.books = sortByRecency(fetched)
+	m.filteredBooks = filterBooks(m.books, m.filter)
+	if hadSelection {
+		for i, b := range m.filteredBooks {
+			if sameBook(b, prev) {
+				m.cursor = i
+				break
+			}
+		}
 	}
-	m.cursor++
-	if m.cursor >= len(m.filteredBooks) {
-		m.cursor = len(m.filteredBooks) - 1
+	m.cursor = min(m.cursor, max(len(m.filteredBooks)-1, 0))
+	m.adjustScroll()
+}
+
+// sortByRecency returns books ordered by when they were last read, newest first.
+// Books with no reading activity follow in server order. Sort keys are computed
+// once per book, so the comparator does no file access.
+func sortByRecency(books []pbc.Book) []pbc.Book {
+	type ranked struct {
+		book pbc.Book
+		at   time.Time
+	}
+	entries := make([]ranked, len(books))
+	for i, b := range books {
+		entries[i] = ranked{book: b, at: readingActivity(b)}
+	}
+	slices.SortStableFunc(entries, func(a, b ranked) int {
+		switch {
+		case a.at.IsZero() && b.at.IsZero():
+			return 0
+		case a.at.IsZero():
+			return 1
+		case b.at.IsZero():
+			return -1
+		}
+		return b.at.Compare(a.at)
+	})
+
+	sorted := make([]pbc.Book, len(entries))
+	for i, e := range entries {
+		sorted[i] = e.book
+	}
+	return sorted
+}
+
+// readingActivity is when a book was last read: the newer of the account's
+// reading position and the local save. It is zero when the book has no reading
+// activity. Upload and metadata dates are not reading activity.
+func readingActivity(book pbc.Book) time.Time {
+	var at time.Time
+	if native, ok := latestNativeProgress(book); ok {
+		at = native.updated
+	}
+	if saved, ok := reader.SavedAt(book.FastHash); ok && saved.After(at) {
+		at = saved
+	}
+	return at
+}
+
+// sameBook reports whether a and b are the same book in the list.
+func sameBook(a, b pbc.Book) bool {
+	return bookIdentity(a) == bookIdentity(b)
+}
+
+// bookIdentity is the server id of a book. The file hash or title stands in
+// when the id is missing.
+func bookIdentity(b pbc.Book) string {
+	switch {
+	case b.ID != "":
+		return b.ID
+	case b.FastHash != "":
+		return b.FastHash
+	}
+	return b.Title
+}
+
+func (m libraryModel) selectedBook() (pbc.Book, bool) {
+	if m.cursor < 0 || m.cursor >= len(m.filteredBooks) {
+		return pbc.Book{}, false
+	}
+	return m.filteredBooks[m.cursor], true
+}
+
+func (m *libraryModel) cursorDown() {
+	if m.cursor < len(m.filteredBooks)-1 {
+		m.cursor++
 	}
 	m.adjustScroll()
 }
@@ -236,233 +386,193 @@ func (m *libraryModel) cursorUp() {
 	m.adjustScroll()
 }
 
+// listCapacity is how many books fit in the list at the current height.
+// Rendering and scroll adjustment both use it, so the selection stays on
+// screen after a resize.
+func (m libraryModel) listCapacity() int {
+	_, h := termSize(m.width, m.height)
+	return max((h-libraryChromeRows)/bookRowHeight, 1)
+}
+
 func (m *libraryModel) adjustScroll() {
-	// Each book takes 2 lines (title + desc); reserve 6 lines for header/footer
-	visibleItems := (m.height - 6) / 2
-	if visibleItems < 1 {
-		visibleItems = 1
-	}
-	if m.cursor < m.scrollOffset {
-		m.scrollOffset = m.cursor
-	}
-	if m.cursor >= m.scrollOffset+visibleItems {
-		m.scrollOffset = m.cursor - visibleItems + 1
-	}
-}
-
-func (m libraryModel) downloadBook(book pbc.Book) tea.Cmd {
-	return func() tea.Msg {
-		homeDir := filepath.Dir(config.ConfigDir())
-		downloadDir := filepath.Join(homeDir, "pocketbook")
-		filename := book.Name
-		if filename == "" {
-			filename = fmt.Sprintf("%s.%s", book.FastHash, book.Format)
-		}
-		destPath := filepath.Join(downloadDir, filename)
-
-		ctx := context.Background()
-		err := m.client.DownloadBook(ctx, book.Link, destPath, nil)
-
-		return downloadProgressMsg{
-			bookTitle: book.Title,
-			done:      err == nil,
-			err:       err,
-		}
-	}
-}
-
-func (m libraryModel) openBook(book pbc.Book) tea.Cmd {
-	return func() tea.Msg {
-		homeDir := filepath.Dir(config.ConfigDir())
-		downloadDir := filepath.Join(homeDir, "pocketbook")
-		filename := book.Name
-		if filename == "" {
-			filename = fmt.Sprintf("%s.%s", book.FastHash, book.Format)
-		}
-		destPath := filepath.Join(downloadDir, filename)
-
-		// Download if not exists
-		if _, err := os.Stat(destPath); os.IsNotExist(err) {
-			ctx := context.Background()
-			if err := m.client.DownloadBook(ctx, book.Link, destPath, nil); err != nil {
-				return OpenBookMsg{Err: fmt.Errorf("download: %w", err)}
-			}
-		}
-
-		// Read file
-		data, err := os.ReadFile(destPath)
-		if err != nil {
-			return OpenBookMsg{Err: fmt.Errorf("read file: %w", err)}
-		}
-
-		// Check DRM
-		if book.IsDrm || book.IsLcp {
-			return OpenBookMsg{Err: fmt.Errorf("this book is DRM-protected and cannot be read in the terminal")}
-		}
-
-		// Parse based on format
-		var content *reader.BookContent
-		format := strings.ToLower(book.Format)
-		switch format {
-		case "epub":
-			content, err = reader.ParseEPUB(data)
-		case "txt":
-			content, err = reader.ParseTXT(data)
-		default:
-			return OpenBookMsg{Err: fmt.Errorf("unsupported format: %s", format)}
-		}
-		if err != nil {
-			return OpenBookMsg{Err: fmt.Errorf("parse: %w", err)}
-		}
-
-		// Check if content is actually readable
-		totalLines := content.TotalLines()
-		if totalLines == 0 {
-			return OpenBookMsg{Err: fmt.Errorf("book has no readable content (parsed 0 lines from %d chapters)", len(content.Chapters))}
-		}
-
-		// Load saved position
-		pos, _ := reader.LoadPosition(book.FastHash)
-
-		return OpenBookMsg{
-			Content:   content,
-			BookHash:  book.FastHash,
-			BookTitle: book.Title,
-			Position:  pos,
-		}
-	}
+	m.scrollOffset = scrollWindow(m.scrollOffset, m.cursor, len(m.filteredBooks), m.listCapacity())
 }
 
 func (m libraryModel) View() string {
-	if m.loading && len(m.books) == 0 {
-		content := lipgloss.JoinVertical(lipgloss.Left,
-			TitleStyle.Render("PocketBook Cloud"),
-			BoxStyle.Render("Loading your library..."),
+	if tooSmall(m.width, m.height) {
+		return tooSmallView(m.width, m.height)
+	}
+	w, h := termSize(m.width, m.height)
+
+	header := []string{
+		titleRow(w, "PocketBook Cloud", m.countLabel()),
+		m.filterRow(w),
+	}
+	footer := []string{
+		"",
+		statusRow(w, m.statusMsg, m.statusIsError),
+		m.hintRow(w),
+	}
+	return frame(w, h, header, m.bodyRows(w), footer)
+}
+
+// countLabel is the header's right-hand summary.
+func (m libraryModel) countLabel() string {
+	if len(m.books) == 0 {
+		return ""
+	}
+	label := fmt.Sprintf("%d books", len(m.books))
+	if len(m.books) == 1 {
+		label = "1 book"
+	}
+	if m.filter != "" {
+		label = fmt.Sprintf("%d of %d", len(m.filteredBooks), len(m.books))
+	}
+	if m.loading {
+		label += " · refreshing"
+	}
+	return label
+}
+
+func (m libraryModel) filterRow(width int) string {
+	const label = "Filter: "
+	switch {
+	case m.filterMode:
+		room := max(width-lipgloss.Width(label)-1, 0)
+		row := mutedStyle.Render(label) + textStyle.Render(fitTail(m.filter, room)) + accentStyle.Render("▏")
+		return fitLine(row+mutedStyle.Render("  enter keep · esc close"), width)
+	case m.filter != "":
+		room := max(width-lipgloss.Width(label), 0)
+		shown := fmt.Sprintf("  %d of %d shown", len(m.filteredBooks), len(m.books))
+		return fitLine(mutedStyle.Render(label)+textStyle.Render(fitTail(m.filter, room))+mutedStyle.Render(shown), width)
+	}
+	return ""
+}
+
+func (m libraryModel) hintRow(width int) string {
+	switch {
+	case m.filterMode:
+		return hintLine(width,
+			keyHint{"enter", "keep"},
+			keyHint{"esc", "close"},
+			keyHint{"backspace", "delete"},
 		)
-		if m.width > 0 && m.height > 0 {
-			return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
-		}
-		return content
-	}
-
-	if m.err != nil && len(m.books) == 0 {
-		errText := m.err.Error()
-		if m.width > 0 {
-			errText = truncate(errText, m.width-8)
-		}
-		content := lipgloss.JoinVertical(lipgloss.Left,
-			TitleStyle.Render("PocketBook Cloud"),
-			BoxStyle.Render(
-				lipgloss.JoinVertical(lipgloss.Left,
-					ErrorStyle.Render("Failed to load library"),
-					errText,
-				),
-			),
-			HelpStyle.Render("R: retry • q: quit"),
+	case len(m.books) == 0 && m.err != nil:
+		return hintLine(width,
+			keyHint{"R", "retry"},
+			keyHint{"L", "log out"},
+			keyHint{"q", "quit"},
 		)
-		if m.width > 0 && m.height > 0 {
-			return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+	}
+	return hintLine(width,
+		keyHint{"r", "read"},
+		keyHint{"enter", "details"},
+		keyHint{"d", "download"},
+		keyHint{"/", "filter"},
+		keyHint{"R", "refresh"},
+		keyHint{"L", "log out"},
+		keyHint{"q", "quit"},
+	)
+}
+
+// bodyRows returns the rows between the header and footer: the book list, or
+// a message for loading, errors, an empty library, or no filter matches.
+func (m libraryModel) bodyRows(width int) []string {
+	const indent = "  "
+	switch {
+	case m.loading && len(m.books) == 0:
+		return []string{"", mutedStyle.Render(indent + "Loading your library…")}
+
+	case len(m.books) == 0 && m.err != nil:
+		rows := []string{"", errorStyle.Render(indent + "Could not load your library")}
+		for _, line := range wrapText(m.err.Error(), width-len(indent)) {
+			rows = append(rows, textStyle.Render(indent+line))
 		}
-		return content
-	}
+		return rows
 
-	// Available width for list items (account for cursor "  " or "> " prefix)
-	listWidth := 80
-	if m.width > 0 {
-		listWidth = m.width - 4
-		if listWidth < 20 {
-			listWidth = 20
-		}
-	}
-
-	var lines []string
-	lines = append(lines, TitleStyle.Render("PocketBook Cloud"))
-
-	if m.filterMode {
-		lines = append(lines, SubtitleStyle.Render(fmt.Sprintf("Filter: %s_", m.filter)))
-	}
-
-	// Book list
-	visibleItems := m.height - 6
-	if visibleItems < 1 {
-		visibleItems = 1
-	}
-	// Each book takes 2 lines (title + desc), so halve visible items
-	visibleItems = visibleItems / 2
-	if visibleItems < 1 {
-		visibleItems = 1
-	}
-
-	end := m.scrollOffset + visibleItems
-	if end > len(m.filteredBooks) {
-		end = len(m.filteredBooks)
-	}
-
-	for i := m.scrollOffset; i < end; i++ {
-		book := m.filteredBooks[i]
-		isSelected := i == m.cursor
-
-		title := book.Title
-		if title == "" {
-			title = "Untitled"
+	case len(m.books) == 0:
+		return []string{
+			"",
+			mutedStyle.Render(indent + "Your library is empty."),
+			mutedStyle.Render(indent + "Press R to refresh."),
 		}
 
-		author := book.MetaData.Authors
-		if author == "" {
-			author = "Unknown Author"
-		}
-
-		icon := "  "
-		if book.Favorite {
-			icon = "★ "
-		} else if book.IsAudioBook {
-			icon = "♪ "
-		}
-
-		// Truncate title to fit terminal width
-		titleMax := listWidth - lipgloss.Width(icon)
-		if titleMax < 5 {
-			titleMax = 5
-		}
-		titleStr := fmt.Sprintf("%s%s", icon, truncate(title, titleMax))
-
-		// Truncate description to fit
-		descStr := fmt.Sprintf("    %s • %s • %d%% • %s",
-			truncate(author, listWidth-20),
-			strings.ToUpper(book.Format), book.ReadPercent, humanBytes(book.Bytes))
-		descStr = truncate(descStr, listWidth)
-
-		if isSelected {
-			lines = append(lines,
-				SelectedItemStyle.Render("> "+titleStr),
-				ItemStyle.Render(descStr),
-			)
-		} else {
-			lines = append(lines,
-				ItemStyle.Render("  "+titleStr),
-				DimColorStyle.Render(descStr),
-			)
+	case len(m.filteredBooks) == 0:
+		return []string{
+			"",
+			mutedStyle.Render(indent + fmt.Sprintf("No books match %q.", m.filter)),
+			mutedStyle.Render(indent + "Press / to change the filter."),
 		}
 	}
+	return m.listRows(width)
+}
 
-	// Status bar
-	statusStyle := SuccessStyle
-	if m.statusIsError {
-		statusStyle = ErrorStyle
+func (m libraryModel) listRows(width int) []string {
+	capacity := m.listCapacity()
+	start := scrollWindow(m.scrollOffset, m.cursor, len(m.filteredBooks), capacity)
+	end := min(start+capacity, len(m.filteredBooks))
+
+	rows := make([]string, 0, (end-start)*bookRowHeight)
+	for i := start; i < end; i++ {
+		rows = append(rows, bookRows(m.filteredBooks[i], i == m.cursor, width)...)
+	}
+	return rows
+}
+
+// bookRows renders one book as two rows: title, then a metadata line. The
+// selected book gets a full-width highlight band and an accent marker.
+func bookRows(book pbc.Book, selected bool, width int) []string {
+	icon := "  "
+	switch {
+	case book.Favorite:
+		icon = "★ "
+	case book.IsAudioBook:
+		icon = "♪ "
 	}
 
-	helpText := fmt.Sprintf("%s • enter: details • r: read • d: download • /: filter • R: refresh • L: logout • q: quit",
-		statusStyle.Render(m.statusMsg))
-
-	helpStyle := HelpStyle
-	if m.width > 0 {
-		helpStyle = HelpStyle.MaxWidth(m.width)
+	author := book.MetaData.Authors
+	if author == "" {
+		author = "Unknown author"
 	}
+	meta := joinNonEmpty(" · ",
+		author,
+		strings.ToUpper(book.Format),
+		fmt.Sprintf("%d%%", book.ReadPercent),
+		humanBytes(book.Bytes),
+	)
 
-	lines = append(lines, "")
-	lines = append(lines, helpStyle.Render(helpText))
+	titleText := truncate(displayTitle(book.Title), width-4)
+	metaText := truncate(meta, width-4)
 
-	return strings.Join(lines, "\n")
+	if !selected {
+		return []string{
+			mutedStyle.Render("  "+icon) + textStyle.Render(titleText),
+			mutedStyle.Render("    " + metaText),
+		}
+	}
+	return []string{
+		selectedMark.Render("› ") + selectedStyle.Width(width-2).Render(icon+titleText),
+		selectedMark.Render("  ") + selectedMeta.Width(width-2).Render("  "+metaText),
+	}
+}
+
+// displayTitle returns the book title, or "Untitled" when it is empty.
+func displayTitle(title string) string {
+	if title == "" {
+		return "Untitled"
+	}
+	return title
+}
+
+// joinNonEmpty joins the non-empty parts with sep.
+func joinNonEmpty(sep string, parts ...string) string {
+	var kept []string
+	for _, p := range parts {
+		if p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, sep)
 }
 
 // ShowDetailMsg is sent when a book is selected.

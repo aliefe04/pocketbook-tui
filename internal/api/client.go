@@ -17,7 +17,8 @@ const (
 )
 
 type Client struct {
-	inner *pbc.Client
+	inner  *pbc.Client
+	native nativeTransport
 }
 
 func New() *Client {
@@ -26,7 +27,17 @@ func New() *Client {
 			pbc.WithClientID(DefaultClientID),
 			pbc.WithClientSecret(DefaultClientSecret),
 		),
+		native: newNativeTransport(nativeBaseURL, nil),
 	}
+}
+
+// NewWithNativeTransport is New with the native reader endpoints at base, and
+// requests sent by hc when it is not nil. Tests use it to keep the native API
+// off the network. Redirects are refused whatever hc does.
+func NewWithNativeTransport(base string, hc *http.Client) *Client {
+	c := New()
+	c.native = newNativeTransport(base, hc)
+	return c
 }
 
 func (c *Client) Providers(ctx context.Context, username string) ([]pbc.Provider, error) {

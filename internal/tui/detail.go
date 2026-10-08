@@ -1,20 +1,22 @@
 package tui
 
 import (
-	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	pbc "github.com/micronull/pocketbook-cloud-client"
 
 	"github.com/aliefe/pocketbook-tui/internal/api"
 	"github.com/aliefe/pocketbook-tui/internal/config"
-	"github.com/aliefe/pocketbook-tui/internal/reader"
 )
+
+// detailLabelWidth is the column width for metadata labels.
+const detailLabelWidth = 10
+
+// detailChromeRows is the number of rows outside the metadata body: the title,
+// the scroll hint, the status, and the key hints.
+const detailChromeRows = 4
 
 type detailModel struct {
 	book          pbc.Book
@@ -24,6 +26,7 @@ type detailModel struct {
 	statusIsError bool
 	width         int
 	height        int
+	scroll        int
 }
 
 func newDetailModel(book pbc.Book, client *api.Client, cfg *config.Config) detailModel {
@@ -43,6 +46,7 @@ func (m detailModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.scrollBy(0)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -53,22 +57,48 @@ func (m detailModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "d":
-			return m, m.downloadBook()
+			m.setStatus("Downloading…", false)
+			return m, downloadBookCmd(m.client, m.book)
 
 		case "r":
-			return m, m.openBook()
+			m.setStatus("Opening…", false)
+			return m, openBookCmd(m.client, m.cfg.Token, m.book, screenDetail)
 
-		case "q":
+		case "j", "down":
+			m.scrollBy(1)
+
+		case "k", "up":
+			m.scrollBy(-1)
+
+		case "pgdown":
+			m.scrollBy(m.bodyCapacity())
+
+		case "pgup":
+			m.scrollBy(-m.bodyCapacity())
+
+		case "q", "ctrl+c":
 			return m, tea.Quit
 		}
 
 	case downloadProgressMsg:
-		if msg.err != nil {
-			m.statusMsg = fmt.Sprintf("Download failed: %v", msg.err)
-			m.statusIsError = true
-		} else if msg.done {
-			m.statusMsg = fmt.Sprintf("Downloaded: %s", msg.bookTitle)
-			m.statusIsError = false
+		switch {
+		case msg.err != nil:
+			m.setStatus(fmt.Sprintf("Download failed: %v", msg.err), true)
+		case msg.done:
+			m.setStatus(fmt.Sprintf("Downloaded: %s", displayTitle(msg.bookTitle)), false)
+		}
+		return m, nil
+
+	case OpenBookMsg:
+		// Successful opens never reach this screen; the App switches to the reader.
+		if msg.Err != nil {
+			m.setStatus(fmt.Sprintf("Open failed: %v", msg.Err), true)
+		}
+		return m, nil
+
+	case openCancelledMsg:
+		if !m.statusIsError {
+			m.setStatus("", false)
 		}
 		return m, nil
 	}
@@ -76,110 +106,78 @@ func (m detailModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m detailModel) downloadBook() tea.Cmd {
-	return func() tea.Msg {
-		homeDir := filepath.Dir(config.ConfigDir())
-		downloadDir := filepath.Join(homeDir, "pocketbook")
-
-		filename := m.book.Name
-		if filename == "" {
-			filename = fmt.Sprintf("%s.%s", m.book.FastHash, m.book.Format)
-		}
-		destPath := filepath.Join(downloadDir, filename)
-
-		ctx := context.Background()
-		err := m.client.DownloadBook(ctx, m.book.Link, destPath, nil)
-
-		return downloadProgressMsg{
-			bookTitle: m.book.Title,
-			done:      err == nil,
-			err:       err,
-		}
-	}
-}
-
-func (m detailModel) openBook() tea.Cmd {
-	return func() tea.Msg {
-		homeDir := filepath.Dir(config.ConfigDir())
-		downloadDir := filepath.Join(homeDir, "pocketbook")
-		filename := m.book.Name
-		if filename == "" {
-			filename = fmt.Sprintf("%s.%s", m.book.FastHash, m.book.Format)
-		}
-		destPath := filepath.Join(downloadDir, filename)
-
-		// Download if not exists
-		if _, err := os.Stat(destPath); os.IsNotExist(err) {
-			ctx := context.Background()
-			if err := m.client.DownloadBook(ctx, m.book.Link, destPath, nil); err != nil {
-				return OpenBookMsg{Err: fmt.Errorf("download: %w", err)}
-			}
-		}
-
-		data, err := os.ReadFile(destPath)
-		if err != nil {
-			return OpenBookMsg{Err: fmt.Errorf("read file: %w", err)}
-		}
-
-		// Check DRM
-		if m.book.IsDrm || m.book.IsLcp {
-			return OpenBookMsg{Err: fmt.Errorf("this book is DRM-protected and cannot be read in the terminal")}
-		}
-
-		var content *reader.BookContent
-		format := strings.ToLower(m.book.Format)
-		switch format {
-		case "epub":
-			content, err = reader.ParseEPUB(data)
-		case "txt":
-			content, err = reader.ParseTXT(data)
-		default:
-			return OpenBookMsg{Err: fmt.Errorf("unsupported format: %s", format)}
-		}
-		if err != nil {
-			return OpenBookMsg{Err: fmt.Errorf("parse: %w", err)}
-		}
-
-		totalLines := content.TotalLines()
-		if totalLines == 0 {
-			return OpenBookMsg{Err: fmt.Errorf("book has no readable content (parsed 0 lines)")}
-		}
-
-		pos, _ := reader.LoadPosition(m.book.FastHash)
-
-		return OpenBookMsg{
-			Content:   content,
-			BookHash:  m.book.FastHash,
-			BookTitle: m.book.Title,
-			Position:  pos,
-		}
-	}
+func (m *detailModel) setStatus(msg string, isErr bool) {
+	m.statusMsg = msg
+	m.statusIsError = isErr
 }
 
 func (m detailModel) View() string {
+	if tooSmall(m.width, m.height) {
+		return tooSmallView(m.width, m.height)
+	}
+	w, h := termSize(m.width, m.height)
+
+	header := []string{titleRow(w, "PocketBook Cloud", "Book details")}
+	footer := []string{
+		m.scrollRow(w),
+		statusRow(w, m.statusMsg, m.statusIsError),
+		hintLine(w,
+			keyHint{"r", "read"},
+			keyHint{"d", "download"},
+			keyHint{"esc", "back"},
+			keyHint{"q", "quit"},
+		),
+	}
+	return frame(w, h, header, m.bodyRows(w)[m.scroll:], footer)
+}
+
+// bodyCapacity is how many metadata rows fit between the title and the footer.
+func (m detailModel) bodyCapacity() int {
+	_, h := termSize(m.width, m.height)
+	return max(h-detailChromeRows, 1)
+}
+
+// scrollBy moves the metadata by delta rows. The offset stays between the
+// first row and the last row that still fills the body, so a resize never
+// leaves blank rows at the bottom.
+func (m *detailModel) scrollBy(delta int) {
+	w, _ := termSize(m.width, m.height)
+	maxScroll := max(len(m.bodyRows(w))-m.bodyCapacity(), 0)
+	m.scroll = min(max(m.scroll+delta, 0), maxScroll)
+}
+
+// scrollRow hints at the scroll keys when the metadata does not fit. It is
+// blank otherwise, so the layout does not shift.
+func (m detailModel) scrollRow(width int) string {
+	if len(m.bodyRows(width)) <= m.bodyCapacity() {
+		return ""
+	}
+	return fitLine(mutedStyle.Render(truncate("  j/k or ↑/↓ scroll · PgUp/PgDn page", width)), width)
+}
+
+// bodyRows lists the title, authors, progress, and the metadata that is set.
+// Progress comes before the metadata so it survives a short terminal.
+func (m detailModel) bodyRows(width int) []string {
+	const indent = "  "
 	b := m.book
+	valueWidth := max(width-len(indent)-detailLabelWidth, 0)
 
-	// Title - truncate if too long
-	titleText := b.Title
-	if m.width > 0 {
-		maxTitle := m.width - 4
-		if maxTitle < 10 {
-			maxTitle = 10
-		}
-		titleText = truncate(titleText, maxTitle)
+	rows := []string{
+		"",
+		boldStyle.Render(indent + truncate(displayTitle(b.Title), width-len(indent))),
 	}
-	title := TitleStyle.Render(titleText)
-
-	// Calculate available width for metadata
-	metaWidth := 0
-	if m.width > 0 {
-		metaWidth = m.width - 8
-		if metaWidth < 30 {
-			metaWidth = 30
-		}
+	if b.MetaData.Authors != "" {
+		rows = append(rows, mutedStyle.Render(indent+truncate(b.MetaData.Authors, width-len(indent))))
 	}
+	rows = append(rows, "",
+		labelStyle.Render(indent+"Progress"),
+		m.progressRow(width),
+	)
+	if b.ReadPosition.Page != "" && b.ReadPosition.PagesTotal > 0 {
+		rows = append(rows, mutedStyle.Render(indent+fmt.Sprintf("Page %s of %d", b.ReadPosition.Page, b.ReadPosition.PagesTotal)))
+	}
+	rows = append(rows, "")
 
-	// Metadata fields
 	fields := []struct {
 		label string
 		value string
@@ -195,93 +193,28 @@ func (m detailModel) View() string {
 		{"LCP", boolStr(b.IsLcp, "Yes", "No")},
 		{"Favorite", boolStr(b.Favorite, "Yes", "No")},
 	}
-
-	var rows []string
 	for _, f := range fields {
-		if f.value == "" || f.value == "0" || f.value == "No" && (f.label == "DRM" || f.label == "LCP") {
+		if f.value == "" || f.value == "0" || (f.value == "No" && (f.label == "DRM" || f.label == "LCP")) {
 			continue
 		}
-		// Truncate long values to fit
-		val := f.value
-		if metaWidth > 0 {
-			maxVal := metaWidth - 14 // label(12) + ": "(2)
-			if maxVal < 5 {
-				maxVal = 5
-			}
-			val = truncate(val, maxVal)
-		}
-		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Left,
-			DetailLabelStyle.Width(12).Render(f.label+":"),
-			DetailValueStyle.Render(val),
-		))
+		rows = append(rows,
+			indent+labelStyle.Width(detailLabelWidth).Render(f.label)+
+				textStyle.Render(truncate(f.value, valueWidth)),
+		)
 	}
-
-	// Reading progress
-	progressBar := m.renderProgressBar()
-	rows = append(rows, "")
-	rows = append(rows, DetailLabelStyle.Render("Progress:"))
-	rows = append(rows, progressBar)
-
-	if b.ReadPosition.Page != "" && b.ReadPosition.PagesTotal > 0 {
-		rows = append(rows, DetailValueStyle.Render(
-			fmt.Sprintf("Page %s of %d", b.ReadPosition.Page, b.ReadPosition.PagesTotal),
-		))
-	}
-
-	boxW := 0
-	if m.width > 0 {
-		boxW = m.width - 8
-		if boxW < 30 {
-			boxW = 30
-		}
-	}
-	metaBox := BoxStyle.Width(boxW).Render(
-		lipgloss.JoinVertical(lipgloss.Left, rows...),
-	)
-
-	// Status
-	statusStyle := SuccessStyle
-	if m.statusIsError {
-		statusStyle = ErrorStyle
-	}
-	status := ""
-	if m.statusMsg != "" {
-		status = statusStyle.Render(m.statusMsg)
-	}
-
-	help := HelpStyle.Render("r: read • d: download • esc/b: back • q: quit")
-
-	if m.width > 0 && m.height > 0 {
-		content := lipgloss.JoinVertical(lipgloss.Left, title, metaBox, status, help)
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
-	}
-
-	return lipgloss.JoinVertical(lipgloss.Left, title, metaBox, status, help)
+	return rows
 }
 
-func (m detailModel) renderProgressBar() string {
-	barWidth := 40
-	if m.width > 0 {
-		barWidth = m.width - 20 // account for box padding, margin, percentage text
-		if barWidth < 10 {
-			barWidth = 10
-		}
-		if barWidth > 60 {
-			barWidth = 60
-		}
-	}
-	percent := m.book.ReadPercent
-	if percent > 100 {
-		percent = 100
-	}
-
+// progressRow draws the reading-progress bar and percentage within width.
+func (m detailModel) progressRow(width int) string {
+	percent := min(max(m.book.ReadPercent, 0), 100)
+	// Reserve the indent and the " 100%" suffix.
+	barWidth := min(max(width-9, 8), 50)
 	filled := barWidth * percent / 100
-	empty := barWidth - filled
 
-	bar := ProgressBarStyle.Render(strings.Repeat("█", filled)) +
-		ProgressBarEmptyStyle.Render(strings.Repeat("░", empty))
-
-	return fmt.Sprintf("%s %d%%", bar, percent)
+	bar := progressFill.Render(strings.Repeat("█", filled)) +
+		progressEmpty.Render(strings.Repeat("░", barWidth-filled))
+	return "  " + bar + mutedStyle.Render(fmt.Sprintf(" %3d%%", percent))
 }
 
 func boolStr(cond bool, t, f string) string {

@@ -16,68 +16,120 @@ const maxBookSize = 200 * 1024 * 1024 // 200MB
 
 // ParseEPUB parses an EPUB file from a byte slice and extracts text content.
 func ParseEPUB(data []byte) (*BookContent, error) {
+	content, _, err := parseEPUB(data, nil)
+	return content, err
+}
+
+// Bookmark is an EPUB location resolved to the reader's virtual lines.
+type Bookmark struct {
+	Chapter    int   // index into BookContent.Chapters
+	LineOffset int   // virtual line within the chapter, title chrome included
+	Err        error // why the pointer could not be resolved; nil when it was
+}
+
+// ParseEPUBAt parses an EPUB like ParseEPUB and resolves an EPUB CFI pointer,
+// such as "#epubcfi(/6/24!/4/4/1)", to the paragraph it names. The error return
+// is only for a book that cannot be parsed. A pointer that cannot be resolved
+// is reported in Bookmark.Err, and the content is still returned.
+func ParseEPUBAt(data []byte, pointer string) (*BookContent, Bookmark, error) {
+	if strings.TrimSpace(pointer) == "" {
+		content, _, err := parseEPUB(data, nil)
+		return content, Bookmark{Err: errNoPointer}, err
+	}
+	ptr, err := parseEPUBPointer(pointer)
+	if err != nil {
+		content, _, perr := parseEPUB(data, nil)
+		return content, Bookmark{Err: err}, perr
+	}
+	return parseEPUB(data, &ptr)
+}
+
+func parseEPUB(data []byte, ptr *epubPointer) (*BookContent, Bookmark, error) {
 	if len(data) > maxBookSize {
-		return nil, fmt.Errorf("book too large: %d MB (max %d MB)", len(data)/(1024*1024), maxBookSize/(1024*1024))
+		return nil, Bookmark{}, fmt.Errorf("book too large: %d MB (max %d MB)", len(data)/(1024*1024), maxBookSize/(1024*1024))
 	}
 
 	r := bytes.NewReader(data)
 	zr, err := zip.NewReader(r, int64(len(data)))
 	if err != nil {
-		return nil, fmt.Errorf("open epub zip: %w", err)
+		return nil, Bookmark{}, fmt.Errorf("open epub zip: %w", err)
 	}
 
 	// Step 1: Find OPF path from META-INF/container.xml
 	opfPath, err := findOPFPath(zr)
 	if err != nil {
-		return nil, err
+		return nil, Bookmark{}, err
 	}
 
 	// Step 2: Parse OPF to get manifest and spine
-	manifest, spine, err := parseOPF(zr, opfPath)
+	opf, err := parseOPF(zr, opfPath)
 	if err != nil {
-		return nil, err
+		return nil, Bookmark{}, err
 	}
 
-	// Step 3: Read spine items in order
+	bm := Bookmark{Err: errNoPointer}
+	if ptr != nil {
+		bm = Bookmark{Err: fmt.Errorf("spine item /%d not found in the package", ptr.itemref)}
+		if ptr.spineStep != opf.spineStep {
+			bm = Bookmark{Err: fmt.Errorf("EPUB CFI package path does not name the spine")}
+		}
+	}
+
+	// Step 3: Read spine items in order. Each item keeps its package step, so a
+	// skipped item does not shift the pointer.
+	opfDir := filepath.Dir(opfPath)
 	var chapters []Chapter
-	for _, itemID := range spine {
-		href, ok := manifest[itemID]
+	for _, item := range opf.spine {
+		href, ok := opf.manifest[item.idref]
 		if !ok {
 			continue
 		}
-		// Resolve relative path from OPF directory
-		opfDir := filepath.Dir(opfPath)
-		contentPath := filepath.Join(opfDir, href)
-		contentPath = filepath.ToSlash(contentPath) // normalize for zip lookup
+		contentPath := filepath.ToSlash(filepath.Join(opfDir, href))
 
-		text, title, err := extractChapterText(zr, contentPath)
-		if err != nil {
-			continue // skip problematic chapters
+		located := ptr != nil && item.step == ptr.itemref
+		if located && !item.matchesID(ptr.itemrefID) {
+			bm = Bookmark{Err: fmt.Errorf("spine item /%d does not match the pointer's ID", item.step)}
+			located = false
+		}
+		var steps []cfiStep
+		if located {
+			steps = ptr.steps
 		}
 
-		chapters = append(chapters, Chapter{
-			Title: title,
-			Lines: text,
-		})
+		xc, err := extractChapterText(zr, contentPath, steps, item.step)
+		if err != nil {
+			if located {
+				bm = Bookmark{Err: fmt.Errorf("spine item /%d unreadable: %w", item.step, err)}
+			}
+			continue // skip problematic chapters
+		}
+		ch := Chapter{Title: xc.title, Lines: xc.lines, anchors: xc.anchors}
+		if opf.spineStep != 6 {
+			// Pointers are written and read as /6/…, so a package with its spine
+			// elsewhere has no exact location to write.
+			ch.anchors = nil
+		}
+		if located {
+			if xc.locateErr != nil {
+				bm = Bookmark{Chapter: len(chapters), Err: xc.locateErr}
+			} else {
+				bm = Bookmark{Chapter: len(chapters), LineOffset: ch.TitleHeight() + xc.line}
+			}
+		}
+		chapters = append(chapters, ch)
 	}
 
 	if len(chapters) == 0 {
-		return nil, fmt.Errorf("no readable chapters found")
+		return nil, bm, fmt.Errorf("no readable chapters found")
 	}
 
-	return &BookContent{Chapters: chapters}, nil
+	return &BookContent{Chapters: chapters}, bm, nil
 }
 
 func findOPFPath(zr *zip.Reader) (string, error) {
 	for _, f := range zr.File {
 		if f.Name == "META-INF/container.xml" {
-			rc, err := f.Open()
-			if err != nil {
-				return "", err
-			}
-			defer rc.Close()
-
-			data, err := io.ReadAll(rc)
+			data, err := readZipFile(f)
 			if err != nil {
 				return "", err
 			}
@@ -100,84 +152,129 @@ func findOPFPath(zr *zip.Reader) (string, error) {
 	return "", fmt.Errorf("META-INF/container.xml not found")
 }
 
-func parseOPF(zr *zip.Reader, opfPath string) (manifest map[string]string, spine []string, err error) {
+// opfPackage is the part of the package document that the reader uses.
+type opfPackage struct {
+	manifest  map[string]string
+	spineStep int         // package child step of the spine element, normally 6
+	spine     []spineItem // in reading order
+}
+
+// spineItem is one itemref. step is its child step inside the spine element,
+// counting every element child, so a pointer's step matches the file even when
+// the spine holds other elements.
+type spineItem struct {
+	step  int
+	id    string
+	idref string
+}
+
+// matchesID reports whether an ID assertion on a pointer's spine item holds. An
+// empty assertion always holds. The ID may name the itemref or the item it
+// refers to.
+func (s spineItem) matchesID(id string) bool {
+	return id == "" || id == s.id || id == s.idref
+}
+
+func parseOPF(zr *zip.Reader, opfPath string) (opfPackage, error) {
 	for _, f := range zr.File {
 		if f.Name == opfPath {
-			rc, err := f.Open()
+			data, err := readZipFile(f)
 			if err != nil {
-				return nil, nil, err
+				return opfPackage{}, err
 			}
-			defer rc.Close()
-
-			data, err := io.ReadAll(rc)
-			if err != nil {
-				return nil, nil, err
-			}
-
-			var opf struct {
-				Manifest struct {
-					Items []struct {
-						ID   string `xml:"id,attr"`
-						Href string `xml:"href,attr"`
-					} `xml:"item"`
-				} `xml:"manifest"`
-				Spine struct {
-					Itemrefs []struct {
-						IDRef string `xml:"idref,attr"`
-					} `xml:"itemref"`
-				} `xml:"spine"`
-			}
-			if err := xml.Unmarshal(data, &opf); err != nil {
-				return nil, nil, err
-			}
-
-			manifest = make(map[string]string)
-			for _, item := range opf.Manifest.Items {
-				manifest[item.ID] = item.Href
-			}
-			for _, ref := range opf.Spine.Itemrefs {
-				spine = append(spine, ref.IDRef)
-			}
-			return manifest, spine, nil
+			return decodeOPF(data)
 		}
 	}
-	return nil, nil, fmt.Errorf("OPF file not found: %s", opfPath)
+	return opfPackage{}, fmt.Errorf("OPF file not found: %s", opfPath)
 }
 
-func extractChapterText(zr *zip.Reader, contentPath string) ([]string, string, error) {
+// decodeOPF reads the manifest and the spine from a package document. Child
+// steps count every element child in document order, as CFI does.
+func decodeOPF(data []byte) (opfPackage, error) {
+	var pkg struct {
+		Children []struct {
+			XMLName xml.Name
+			Inner   []byte `xml:",innerxml"`
+		} `xml:",any"`
+	}
+	if err := xml.Unmarshal(data, &pkg); err != nil {
+		return opfPackage{}, err
+	}
+
+	opf := opfPackage{manifest: make(map[string]string)}
+	for k, child := range pkg.Children {
+		switch child.XMLName.Local {
+		case "manifest":
+			var m struct {
+				Items []struct {
+					ID   string `xml:"id,attr"`
+					Href string `xml:"href,attr"`
+				} `xml:"item"`
+			}
+			if err := unmarshalInner(child.Inner, "manifest", &m); err != nil {
+				return opfPackage{}, err
+			}
+			for _, item := range m.Items {
+				opf.manifest[item.ID] = item.Href
+			}
+		case "spine":
+			opf.spineStep = 2 * (k + 1)
+			var s struct {
+				Children []struct {
+					XMLName xml.Name
+					ID      string `xml:"id,attr"`
+					IDRef   string `xml:"idref,attr"`
+				} `xml:",any"`
+			}
+			if err := unmarshalInner(child.Inner, "spine", &s); err != nil {
+				return opfPackage{}, err
+			}
+			for j, c := range s.Children {
+				if c.XMLName.Local == "itemref" {
+					opf.spine = append(opf.spine, spineItem{step: 2 * (j + 1), id: c.ID, idref: c.IDRef})
+				}
+			}
+		}
+	}
+	return opf, nil
+}
+
+// unmarshalInner decodes the children of an element whose inner XML is given.
+func unmarshalInner(inner []byte, name string, v any) error {
+	wrapped := append(append([]byte("<"+name+">"), inner...), []byte("</"+name+">")...)
+	return xml.Unmarshal(wrapped, v)
+}
+
+func readZipFile(f *zip.File) ([]byte, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
+func extractChapterText(zr *zip.Reader, contentPath string, steps []cfiStep, itemref int) (xhtmlChapter, error) {
 	for _, f := range zr.File {
 		if f.Name == contentPath {
-			rc, err := f.Open()
+			data, err := readZipFile(f)
 			if err != nil {
-				return nil, "", err
+				return xhtmlChapter{}, err
 			}
-			defer rc.Close()
-
-			data, err := io.ReadAll(rc)
-			if err != nil {
-				return nil, "", err
-			}
-
-			text, title := htmlToText(string(data))
-			return text, title, nil
+			return readXHTML(data, steps, itemref), nil
 		}
 	}
-	return nil, "", fmt.Errorf("content file not found: %s", contentPath)
+	return xhtmlChapter{}, fmt.Errorf("content file not found: %s", contentPath)
 }
 
+// htmlToText returns the body lines and title of an HTML document, as the
+// reader lays them out.
 func htmlToText(htmlStr string) ([]string, string) {
 	doc, err := html.Parse(strings.NewReader(htmlStr))
 	if err != nil {
 		return nil, ""
 	}
-
-	// First pass: extract title
-	title := extractTitle(doc)
-
-	// Second pass: extract body text
-	textLines := extractBodyText(doc)
-
-	return textLines, title
+	return walkLines(fromHTML(doc), nil, false).lines, extractTitle(doc)
 }
 
 func extractTitle(n *html.Node) string {
@@ -193,64 +290,6 @@ func extractTitle(n *html.Node) string {
 		}
 	}
 	return ""
-}
-
-func extractBodyText(n *html.Node) []string {
-	var lines []string
-	var current strings.Builder
-
-	var walk func(*html.Node, bool)
-	walk = func(n *html.Node, skip bool) {
-		if n.Type == html.ElementNode {
-			// Skip script and style tags entirely
-			if n.Data == "script" || n.Data == "style" || n.Data == "nav" {
-				return
-			}
-
-			// Flush on block elements
-			if isBlockElement(n.Data) {
-				if current.Len() > 0 {
-					lines = append(lines, strings.TrimSpace(current.String()))
-					current.Reset()
-				}
-			}
-		}
-
-		if n.Type == html.TextNode && !skip {
-			text := strings.TrimSpace(n.Data)
-			if text != "" {
-				if current.Len() > 0 {
-					current.WriteString(" ")
-				}
-				current.WriteString(text)
-			}
-		}
-
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c, skip)
-		}
-
-		if n.Type == html.ElementNode {
-			// Flush after block elements
-			if isBlockElement(n.Data) {
-				if current.Len() > 0 {
-					lines = append(lines, strings.TrimSpace(current.String()))
-					current.Reset()
-				}
-				if isHeaderElement(n.Data) {
-					lines = append(lines, "")
-				}
-			}
-		}
-	}
-
-	walk(n, false)
-
-	if current.Len() > 0 {
-		lines = append(lines, strings.TrimSpace(current.String()))
-	}
-
-	return lines
 }
 
 func isBlockElement(tag string) bool {

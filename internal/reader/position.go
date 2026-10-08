@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // positionVersion is the current on-disk format version for saved positions.
@@ -122,6 +123,21 @@ func SavePosition(pos *Position) error {
 		return fmt.Errorf("write position: %w", err)
 	}
 	return nil
+}
+
+// SavedAt reports when the local position for a book was last saved, from the
+// position file's modification time. ok is false when there is no readable
+// saved position.
+func SavedAt(bookHash string) (at time.Time, ok bool) {
+	pos, err := LoadPosition(bookHash)
+	if err != nil || pos == nil {
+		return time.Time{}, false
+	}
+	info, err := os.Stat(filepath.Join(PositionDir(), bookHash+".json"))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return info.ModTime(), true
 }
 
 // CalculatePercent computes reading percentage from position.

@@ -6,7 +6,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/micronull/pocketbook-cloud-client"
 
 	"github.com/aliefe/pocketbook-tui/internal/api"
@@ -22,6 +21,9 @@ const (
 	loginStateLoading
 	loginStateError
 )
+
+// loginIndent is the left indent of every login row.
+const loginIndent = "  "
 
 type loginModel struct {
 	state      loginState
@@ -46,16 +48,15 @@ func newLoginModel(client *api.Client, cfg *config.Config) loginModel {
 	m.emailInput = textinput.New()
 	m.emailInput.Placeholder = "your@email.com"
 	m.emailInput.Focus()
-	m.emailInput.Width = 40
-	m.emailInput.PromptStyle = lipgloss.NewStyle().Foreground(PrimaryColor)
+	m.emailInput.PromptStyle = accentStyle
 
 	m.passInput = textinput.New()
 	m.passInput.Placeholder = "password"
 	m.passInput.EchoMode = textinput.EchoPassword
 	m.passInput.EchoCharacter = '•'
-	m.passInput.Width = 40
-	m.passInput.PromptStyle = lipgloss.NewStyle().Foreground(PrimaryColor)
+	m.passInput.PromptStyle = accentStyle
 
+	m.resizeInputs()
 	return m
 }
 
@@ -63,21 +64,13 @@ func (m loginModel) Init() tea.Cmd {
 	return textinput.Blink
 }
 
-// resizeInputs adjusts text input widths based on terminal width.
+// resizeInputs sizes both text inputs to the terminal width, leaving room for
+// the indent and prompt.
 func (m *loginModel) resizeInputs() {
-	if m.width == 0 {
-		return
-	}
-	// Box: border(2) + padding(2) + margin(2) + label "Email:"(6) + prompt(2) = ~14
-	w := m.width - 20
-	if w < 10 {
-		w = 10
-	}
-	if w > 60 {
-		w = 60
-	}
-	m.emailInput.Width = w
-	m.passInput.Width = w
+	w, _ := termSize(m.width, m.height)
+	inputWidth := min(max(w-6, 10), 50)
+	m.emailInput.Width = inputWidth
+	m.passInput.Width = inputWidth
 }
 
 type providersMsg struct {
@@ -92,6 +85,9 @@ type loginSuccessMsg struct {
 }
 
 type loginErrMsg struct{ err error }
+
+// LoginSuccessMsg is sent when login is successful.
+type LoginSuccessMsg struct{}
 
 func (m loginModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -133,6 +129,7 @@ func (m loginModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.providers = msg.providers
+		m.selected = 0
 		if len(m.providers) == 0 {
 			m.state = loginStateError
 			m.err = fmt.Errorf("no providers found for this email")
@@ -220,83 +217,74 @@ func (m loginModel) handleEnter() (tea.Model, tea.Cmd) {
 }
 
 func (m loginModel) View() string {
-	if m.width == 0 || m.height == 0 {
-		// Terminal size not yet known, render unstyled
-		return m.renderContent()
+	if tooSmall(m.width, m.height) {
+		return tooSmallView(m.width, m.height)
 	}
-	content := m.renderContent()
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+	w, h := termSize(m.width, m.height)
+
+	header := []string{titleRow(w, "PocketBook Cloud", "Sign in")}
+	body, hints := m.stateBody(w, h, len(header))
+	footer := []string{"", hintLine(w, hints...)}
+	return frame(w, h, header, body, footer)
 }
 
-func (m loginModel) renderContent() string {
-	var content string
-
+// stateBody returns the rows for the current state and the key hints to show
+// under them. headerRows is the number of rows above the body, so the provider
+// list can size its scroll window.
+func (m loginModel) stateBody(width, height, headerRows int) ([]string, []keyHint) {
+	quit := keyHint{"esc", "quit"}
 	switch m.state {
 	case loginStateEmail:
-		content = lipgloss.JoinVertical(lipgloss.Left,
-			TitleStyle.Render("PocketBook Cloud"),
-			SubtitleStyle.Render("Enter your email to continue"),
-			BoxStyle.Render(
-				lipgloss.JoinVertical(lipgloss.Left,
-					"Email:",
-					m.emailInput.View(),
-				),
-			),
-			HelpStyle.Render("enter: continue • esc: quit"),
-		)
+		return []string{
+			"",
+			labelStyle.Render(loginIndent + "Email"),
+			loginIndent + m.emailInput.View(),
+		}, []keyHint{{"enter", "continue"}, quit}
 
 	case loginStatePassword:
-		content = lipgloss.JoinVertical(lipgloss.Left,
-			TitleStyle.Render("PocketBook Cloud"),
-			SubtitleStyle.Render(fmt.Sprintf("Email: %s", m.emailInput.Value())),
-			BoxStyle.Render(
-				lipgloss.JoinVertical(lipgloss.Left,
-					"Password:",
-					m.passInput.View(),
-				),
-			),
-			HelpStyle.Render("enter: login • esc: quit"),
-		)
+		return []string{
+			"",
+			mutedStyle.Render(loginIndent + truncate("Email: "+m.emailInput.Value(), width-len(loginIndent))),
+			"",
+			labelStyle.Render(loginIndent + "Password"),
+			loginIndent + m.passInput.View(),
+		}, []keyHint{{"enter", "sign in"}, quit}
 
 	case loginStateProvider:
-		var list string
-		for i, p := range m.providers {
-			style := ItemStyle
-			if i == m.selected {
-				style = SelectedItemStyle.Copy().Foreground(PrimaryColor)
-				list += style.Render("> " + p.Name) + "\n"
-			} else {
-				list += style.Render("  "+p.Name) + "\n"
-			}
+		prelude := []string{"", mutedStyle.Render(loginIndent + "Select your account provider")}
+		footerRows := 2
+		capacity := max(height-headerRows-len(prelude)-footerRows, 1)
+		start := scrollWindow(0, m.selected, len(m.providers), capacity)
+		end := min(start+capacity, len(m.providers))
+
+		body := prelude
+		for i := start; i < end; i++ {
+			body = append(body, providerRow(m.providers[i].Name, i == m.selected, width))
 		}
-		content = lipgloss.JoinVertical(lipgloss.Left,
-			TitleStyle.Render("PocketBook Cloud"),
-			SubtitleStyle.Render("Select your account provider"),
-			BoxStyle.Render(list),
-			HelpStyle.Render("↑/↓: select • enter: confirm • esc: quit"),
-		)
+		return body, []keyHint{{"↑/↓", "select"}, {"enter", "confirm"}, quit}
 
 	case loginStateLoading:
-		content = lipgloss.JoinVertical(lipgloss.Left,
-			TitleStyle.Render("PocketBook Cloud"),
-			BoxStyle.Render("Loading..."),
-		)
+		return []string{"", mutedStyle.Render(loginIndent + "Contacting PocketBook Cloud…")}, nil
 
 	case loginStateError:
-		content = lipgloss.JoinVertical(lipgloss.Left,
-			TitleStyle.Render("PocketBook Cloud"),
-			BoxStyle.Render(
-				lipgloss.JoinVertical(lipgloss.Left,
-					ErrorStyle.Render("Error"),
-					m.err.Error(),
-				),
-			),
-			HelpStyle.Render("enter: retry • esc: quit"),
-		)
+		text := "unknown error"
+		if m.err != nil {
+			text = m.err.Error()
+		}
+		body := []string{"", errorStyle.Render(loginIndent + "Could not continue")}
+		for _, line := range wrapText(text, width-len(loginIndent)) {
+			body = append(body, textStyle.Render(loginIndent+line))
+		}
+		return body, []keyHint{{"enter", "retry"}, quit}
 	}
-
-	return content
+	return nil, nil
 }
 
-// LoginSuccessMsg is sent when login is successful.
-type LoginSuccessMsg struct{}
+// providerRow renders one provider in the selection list.
+func providerRow(name string, selected bool, width int) string {
+	name = truncate(name, width-4)
+	if selected {
+		return selectedMark.Render("› ") + selectedStyle.Width(width-2).Render(name)
+	}
+	return loginIndent + textStyle.Render(name)
+}

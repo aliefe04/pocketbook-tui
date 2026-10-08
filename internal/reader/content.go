@@ -6,6 +6,10 @@ import "strings"
 type Chapter struct {
 	Title string
 	Lines []string
+	// anchors gives the EPUB source of each body line. It is nil for books
+	// without an EPUB source, and for documents whose markup could not be
+	// matched to their text exactly.
+	anchors *anchorTable
 }
 
 // titleHeight is the number of virtual lines a chapter title occupies when
@@ -73,6 +77,19 @@ func (bc *BookContent) PositionToChapter(globalLine int) (chapterIdx int, lineIn
 		return lastIdx, bc.Chapters[lastIdx].RenderedLineCount() - 1
 	}
 	return 0, 0
+}
+
+// LocateFraction returns the chapter and virtual line offset at a whole
+// percentage of the book. It is the inverse of CalculatePercent, and it is used
+// when a bookmark has only a percentage.
+func (bc *BookContent) LocateFraction(percent int) (chapterIdx, lineOffset int) {
+	total := bc.TotalLines()
+	if total == 0 {
+		return 0, 0
+	}
+	percent = min(max(percent, 0), 100)
+	global := min(percent*total/100, total-1)
+	return bc.PositionToChapter(global)
 }
 
 // WrapLine breaks a long line into multiple lines of maxWidth (rune-based,
