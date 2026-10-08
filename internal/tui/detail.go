@@ -123,6 +123,7 @@ func (m detailModel) View() string {
 		statusRow(w, m.statusMsg, m.statusIsError),
 		hintLine(w,
 			keyHint{"r", "read"},
+			keyHint{"S", "settings"},
 			keyHint{"d", "download"},
 			keyHint{"esc", "back"},
 			keyHint{"q", "quit"},

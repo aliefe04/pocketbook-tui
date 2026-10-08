@@ -133,6 +133,9 @@ Small terminals show compact choices. The `↵` symbol means `enter`.
 
 ## Customization
 
+Settings shortcuts appear in the library, book-detail, and reader bars, including compact terminals.
+Important save notices remain visible when the reader bars are hidden.
+
 Press `S` to open settings. Changes stay in a draft until you press `s` to save.
 Press `esc` to discard the draft. Press `r` to reset the draft to defaults.
 Use `↑`/`↓` to select a setting, `←`/`→` to change it, and `tab` to reach the next category.

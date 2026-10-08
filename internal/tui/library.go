@@ -480,12 +480,14 @@ func (m libraryModel) hintRow(width int) string {
 	case len(m.books) == 0 && m.err != nil:
 		return hintLine(width,
 			keyHint{"R", "retry"},
+			keyHint{"S", "settings"},
 			keyHint{"L", "log out"},
 			keyHint{"q", "quit"},
 		)
 	}
 	return hintLine(width,
 		keyHint{"r", "read"},
+		keyHint{"S", "settings"},
 		keyHint{"enter", "details"},
 		keyHint{"d", "download"},
 		keyHint{"/", "filter"},

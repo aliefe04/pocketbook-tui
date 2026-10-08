@@ -128,6 +128,9 @@ func (m *readerModel) bodyRows() int {
 	if m.prefs.ShowFooter {
 		chrome += 2
 	}
+	if m.statusMsg != "" {
+		chrome++
+	}
 	return max(h-chrome, 1)
 }
 func (m *readerModel) verticalPadding() int {
@@ -370,38 +373,65 @@ func (m readerModel) View() string {
 		body[i] = strings.Repeat(" ", margin) + body[i]
 	}
 	pct := m.progressText()
-	title := truncate(m.bookTitle, max(w-len(pct)-1, 0))
-	header := readDim.Render(title) + strings.Repeat(" ", max(w-lipgloss.Width(title)-len(pct), 0)) + readDim.Render(pct)
+	headerRight := pct
+	if !m.prefs.ShowFooter {
+		settingsHint := "S:settings"
+		withSettings := settingsHint
+		if pct != "" {
+			withSettings = settingsHint + " · " + pct
+		}
+		if lipgloss.Width(withSettings)+1 <= w {
+			headerRight = withSettings
+		}
+	}
+	title := truncate(m.bookTitle, max(w-lipgloss.Width(headerRight)-1, 0))
+	header := readDim.Render(title) + strings.Repeat(" ", max(w-lipgloss.Width(title)-lipgloss.Width(headerRight), 0)) + readDim.Render(headerRight)
 	rule := readDim.Render(strings.Repeat("─", w))
 	chTitle := ""
 	if ch := m.currentChapter(); ch != nil {
 		chTitle = cleanBookText(strings.TrimSpace(ch.Title))
 	}
-	left := fmt.Sprintf("Ch %d/%d", m.chapterIdx+1, len(m.content.Chapters))
-	if chTitle != "" {
-		left += " · " + chTitle
-	}
+	chCount := fmt.Sprintf("Ch %d/%d", m.chapterIdx+1, len(m.content.Chapters))
 	mode := "pages"
 	if !m.pageMode {
 		mode = "scroll"
 	}
-	right := mode + " · S:settings · ?:help"
-	style := readDim
-	if m.statusMsg != "" {
-		right = m.statusMsg
-		if m.statusIsError {
-			style = errorStyle
-		}
+	cand1 := mode + " · S:settings · ?:help"
+	cand2 := mode + " · S:settings"
+	cand3 := "S:settings"
+
+	var right string
+	switch {
+	case lipgloss.Width(chCount)+1+lipgloss.Width(cand1) <= w:
+		right = cand1
+	case lipgloss.Width(chCount)+1+lipgloss.Width(cand2) <= w:
+		right = cand2
+	default:
+		right = truncate(cand3, max(w-lipgloss.Width(chCount)-1, 0))
 	}
-	left = truncate(left, max(w-12, 1))
-	right = truncate(right, max(w-lipgloss.Width(left)-1, 0))
-	footer := readDim.Render(left) + strings.Repeat(" ", max(w-lipgloss.Width(left)-lipgloss.Width(right), 0)) + style.Render(right)
+
+	leftRoom := max(w-lipgloss.Width(right)-1, 0)
+	var left string
+	if chTitle != "" && leftRoom > lipgloss.Width(chCount)+3 {
+		titleRoom := leftRoom - lipgloss.Width(chCount) - 3
+		left = chCount + " · " + truncate(chTitle, titleRoom)
+	} else {
+		left = truncate(chCount, leftRoom)
+	}
+
+	controls := readDim.Render(left) + strings.Repeat(" ", max(w-lipgloss.Width(left)-lipgloss.Width(right), 0)) + readDim.Render(right)
 	var headers, footers []string
 	if m.prefs.ShowHeader {
 		headers = []string{header, rule}
 	}
 	if m.prefs.ShowFooter {
-		footers = []string{rule, footer}
+		if m.statusMsg != "" {
+			footers = []string{rule, statusRow(w, m.statusMsg, m.statusIsError), controls}
+		} else {
+			footers = []string{rule, controls}
+		}
+	} else if m.statusMsg != "" {
+		footers = []string{statusRow(w, m.statusMsg, m.statusIsError)}
 	}
 	return frame(w, h, headers, body, footers)
 }
@@ -410,7 +440,10 @@ func (m readerModel) helpView() string {
 	w, h := termSize(m.width, m.height)
 	inner := max(w-2, 1)
 	var lines []string
-	if m.note != nil && m.note.help != "" {
+	if m.statusMsg != "" {
+		lines = append(lines, wrapText(m.statusMsg, inner)...)
+	}
+	if m.note != nil && m.note.help != "" && m.note.help != m.statusMsg {
 		lines = append(lines, wrapText(m.note.help, inner)...)
 	}
 	lines = append(lines,
