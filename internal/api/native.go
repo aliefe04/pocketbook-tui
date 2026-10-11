@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	pbc "github.com/micronull/pocketbook-cloud-client"
 )
 
 // nativeBaseURL is the host and path of the PocketBook Cloud reader API, the
@@ -200,6 +202,104 @@ func (c *Client) SaveNativePosition(ctx context.Context, token, fastHash string,
 	}
 	_, err = c.native.send(ctx, op, http.MethodPost, endpoint, token, body)
 	return err
+}
+
+// renewTokenPath is the session renewal endpoint the PocketBook web reader
+// uses. It trades a refresh token for a new access token, so a terminal session
+// outlives one access token and does not ask for the password again.
+const renewTokenPath = "auth/renew-token"
+
+// sessionEndpoint returns the URL of a path that takes no file hash.
+func (t nativeTransport) sessionEndpoint(segments ...string) (string, error) {
+	u, err := url.Parse(t.base)
+	if err != nil {
+		return "", fmt.Errorf("native base URL: %w", err)
+	}
+	return u.JoinPath(segments...).String(), nil
+}
+
+// sendForm posts url-encoded fields with a bearer token and returns the body.
+// A context with a deadline keeps it; one without is bounded by
+// defaultNativeTimeout.
+func (t nativeTransport) sendForm(ctx context.Context, op, endpoint, token string, form url.Values) ([]byte, error) {
+	if token == "" {
+		return nil, fmt.Errorf("%s: not signed in", op)
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultNativeTimeout)
+		defer cancel()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader([]byte(form.Encode())))
+	if err != nil {
+		return nil, fmt.Errorf("%s: build request", op)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json, text/plain")
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return nil, requestError(op, err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxNativeBody+1))
+	if err != nil {
+		return nil, fmt.Errorf("%s: read response", op)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, &HTTPError{Op: op, Status: resp.StatusCode}
+	}
+	if len(data) > maxNativeBody {
+		return nil, fmt.Errorf("%s: response too large", op)
+	}
+	return data, nil
+}
+
+// RenewToken exchanges a refresh token for a new access token. The stored
+// access token travels in the Authorization header, as the web reader sends it.
+// A server that omits a new refresh token keeps the caller's stored one.
+func (c *Client) RenewToken(ctx context.Context, token, refreshToken string) (pbc.Token, error) {
+	const op = "renew session"
+	if token == "" || refreshToken == "" {
+		return pbc.Token{}, fmt.Errorf("%s: no stored session", op)
+	}
+	endpoint, err := c.native.sessionEndpoint(renewTokenPath)
+	if err != nil {
+		return pbc.Token{}, err
+	}
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", refreshToken)
+
+	body, err := c.native.sendForm(ctx, op, endpoint, token, form)
+	if err != nil {
+		return pbc.Token{}, err
+	}
+
+	var data struct {
+		AccessToken  string `json:"access_token"`
+		ExpiresIn    int    `json:"expires_in"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return pbc.Token{}, fmt.Errorf("%s: decode response: %w", op, err)
+	}
+	if data.AccessToken == "" {
+		return pbc.Token{}, fmt.Errorf("%s: response has no access token", op)
+	}
+	if data.RefreshToken == "" {
+		data.RefreshToken = refreshToken
+	}
+
+	return pbc.Token{
+		AccessToken:  data.AccessToken,
+		TokenType:    pbc.TokenTypeBearer,
+		ExpiresIn:    time.Now().Add(time.Duration(data.ExpiresIn) * time.Second),
+		RefreshToken: data.RefreshToken,
+	}, nil
 }
 
 // parseNativeTime reads a timestamp from a native response. An unreadable or

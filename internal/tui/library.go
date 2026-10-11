@@ -102,10 +102,10 @@ func (m libraryModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case booksLoadedMsg:
 		m.loading = false
 		if msg.err != nil {
-			// A 401 means the stored token is no longer valid.
+			// A 401 means the stored token is no longer valid. The app tries to
+			// renew the session before it asks for the password again, so this
+			// screen only reports the failure.
 			if isUnauthorized(msg.err) {
-				m.cfg.ClearAuth()
-				m.cfg.Save()
 				return m, func() tea.Msg {
 					return UnauthorizedMsg{}
 				}

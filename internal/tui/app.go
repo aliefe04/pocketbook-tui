@@ -1,9 +1,15 @@
 package tui
 
 import (
+	"context"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"strings"
+	pbc "github.com/micronull/pocketbook-cloud-client"
 
 	"github.com/aliefe/pocketbook-tui/internal/api"
 	"github.com/aliefe/pocketbook-tui/internal/config"
@@ -34,6 +40,7 @@ type App struct {
 	prefsErr       error
 	client         *api.Client
 	cfg            *config.Config
+	renewTried     bool
 	width          int
 	height         int
 }
@@ -79,6 +86,12 @@ func (a *App) Init() tea.Cmd {
 		cmd = a.library.Init()
 	case screenDetail:
 		cmd = a.detail.Init()
+	}
+	if a.cfg.NeedsRenewal(time.Now()) {
+		// Renew in the background, so the app never waits for a rejected
+		// request before keeping the session alive.
+		a.renewTried = true
+		cmd = tea.Batch(cmd, a.renewSession())
 	}
 	return tea.Batch(cmd, mouseCommand(a.preferences().Mouse))
 }
@@ -132,12 +145,40 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.openReader(msg)
 		}
 		if isUnauthorized(msg.Err) {
+			if !a.renewTried {
+				a.renewTried = true
+				if cmd := a.renewSession(); cmd != nil {
+					return a, cmd
+				}
+			}
 			return a, a.reauthenticate()
 		}
 		return a, a.deliverOpenError(msg)
 
 	case UnauthorizedMsg:
+		if !a.renewTried {
+			a.renewTried = true
+			if cmd := a.renewSession(); cmd != nil {
+				return a, cmd
+			}
+		}
 		return a, a.reauthenticate()
+
+	case sessionRenewedMsg:
+		// A background renewal keeps the stored session alive for months.
+		if msg.err != nil {
+			if isAuthFailure(msg.err) {
+				return a, a.reauthenticate()
+			}
+			return a, nil
+		}
+		a.cfg.SetSession(msg.token.AccessToken, msg.token.RefreshToken, msg.token.ExpiresIn)
+		if a.cfg.Save() != nil {
+			// The session in memory is valid, so reading continues. The next
+			// successful write stores the new tokens.
+			return a, nil
+		}
+		return a, nil
 
 	case readerLeftMsg:
 		// The reader's session is over. The library shows the notice, and a
@@ -147,7 +188,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case booksLoadedMsg:
 		// The library loads in the background, so its result must reach it even
-		// when another screen is showing.
+		// when another screen is showing. A good load proves the session works,
+		// so one renewal attempt is allowed again later.
+		if msg.err == nil {
+			a.renewTried = false
+		}
 		return a, update(&a.library, msg)
 
 	case downloadProgressMsg:
@@ -314,8 +359,42 @@ func (a *App) deliverOpenError(msg OpenBookMsg) tea.Cmd {
 	return nil
 }
 
+// sessionRenewedMsg reports the result of a background session renewal.
+type sessionRenewedMsg struct {
+	token pbc.Token
+	err   error
+}
+
+// renewSession trades the stored refresh token for a new access token, so a
+// signed-in terminal does not ask for the password again. It returns nil when
+// the stored session cannot be renewed.
+func (a *App) renewSession() tea.Cmd {
+	client, access, refresh := a.client, a.cfg.Token, a.cfg.RefreshToken
+	if access == "" || refresh == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		token, err := client.RenewToken(ctx, access, refresh)
+		return sessionRenewedMsg{token: token, err: err}
+	}
+}
+
+// isAuthFailure reports whether err means the account must sign in again. A
+// network failure is not an auth failure, so an offline terminal keeps its
+// stored session.
+func isAuthFailure(err error) bool {
+	var httpErr *api.HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.Status == http.StatusUnauthorized || httpErr.Status == http.StatusForbidden
+	}
+	return isUnauthorized(err)
+}
+
 // reauthenticate clears the stored session and shows the login screen.
 func (a *App) reauthenticate() tea.Cmd {
+	a.renewTried = true
 	a.cfg.ClearAuth()
 	a.cfg.Save()
 	a.screen = screenLogin
