@@ -146,11 +146,14 @@ type flowWalk struct {
 	flat     []cfiStep
 	ends     []int
 
-	// block is the innermost block element being walked. With the emphasis
-	// flags it decides the kind of the line that is being collected.
+	// block, quote and caption are the elements around the text being
+	// walked. With the emphasis flags they decide the kind of the line that
+	// is being collected.
 	kinds    []LineKind
 	block    *srcNode
+	quote    *srcNode
 	caption  *srcNode
+	lineKind LineKind
 	emphasis int
 	italics  bool
 	plain    bool
@@ -190,38 +193,39 @@ func (f *flowWalk) flush() {
 	}
 	line := strings.TrimSpace(f.cur.String())
 	f.cur.Reset()
-	f.emit(line, f.pendingKind(line))
+	kind := f.lineKind
+	switch {
+	case kind == LineQuote && isAttribution(line):
+		kind = LineAttribution
+	case kind == LineBody && f.italics && !f.plain:
+		// A passage set entirely in italics: an epigraph or a displayed quote.
+		kind = LineEpigraph
+	}
+	f.emit(line, kind)
 	f.italics, f.plain = false, false
 }
 
-// pendingKind is the kind of the line being collected. A class or the block
-// element itself decides it, so the reader shows quotations, captions and
-// headings the way the book sets them. It never changes how many lines there
-// are, only how they look.
-func (f *flowWalk) pendingKind(line string) LineKind {
+// startKind is the kind of the line that is about to start. The caption, the
+// class and the block around the first text decide it. A caption that is not a
+// block element still marks its own line, because the kind is read here and
+// not when the enclosing block flushes.
+func (f *flowWalk) startKind() LineKind {
 	if f.caption != nil {
 		return LineCaption
 	}
 	if kind := classKind(f.block); kind != LineBody {
 		return kind
 	}
-	if f.block == nil {
-		return LineBody
-	}
-	switch f.block.name {
-	case "h1", "h2", "h3", "h4", "h5", "h6":
-		return LineHeading
-	case "figcaption", "caption":
-		return LineCaption
-	case "blockquote":
-		if isAttribution(line) {
-			return LineAttribution
+	if f.block != nil {
+		switch f.block.name {
+		case "h1", "h2", "h3", "h4", "h5", "h6":
+			return LineHeading
+		case "figcaption", "caption":
+			return LineCaption
 		}
-		return LineQuote
 	}
-	if f.italics && !f.plain {
-		// A passage set entirely in italics: an epigraph or a displayed quote.
-		return LineEpigraph
+	if f.quote != nil {
+		return LineQuote
 	}
 	return LineBody
 }
@@ -293,11 +297,14 @@ func (f *flowWalk) text(n *srcNode, index, before int) {
 	}
 	if f.cur.Len() > 0 {
 		f.cur.WriteByte(' ')
-	} else if f.trace && f.body > 0 {
-		lead := len(n.text) - len(strings.TrimLeftFunc(n.text, unicode.IsSpace))
-		f.start = append(f.start[:0], f.path...)
-		f.start = append(f.start, cfiStep{index: index, offset: before + utf16Len(n.text[:lead])})
-		f.hasStart = true
+	} else {
+		f.lineKind = f.startKind()
+		if f.trace && f.body > 0 {
+			lead := len(n.text) - len(strings.TrimLeftFunc(n.text, unicode.IsSpace))
+			f.start = append(f.start[:0], f.path...)
+			f.start = append(f.start, cfiStep{index: index, offset: before + utf16Len(n.text[:lead])})
+			f.hasStart = true
+		}
 	}
 	if f.emphasis > 0 {
 		f.italics = true
@@ -326,6 +333,10 @@ func (f *flowWalk) element(n *srcNode) {
 	if isBlockElement(n.name) {
 		f.block = n
 	}
+	previousQuote := f.quote
+	if n.name == "blockquote" || classKind(n) == LineQuote {
+		f.quote = n
+	}
 	previousCaption := f.caption
 	if n.name == "figcaption" || n.name == "caption" {
 		f.caption = n
@@ -338,13 +349,12 @@ func (f *flowWalk) element(n *srcNode) {
 	if emphasis {
 		f.emphasis--
 	}
-	// The caption context is restored after the flush below, so the lines that
-	// the caption produced keep their kind.
+	f.quote = previousQuote
+	f.caption = previousCaption
 	if isBlockElement(n.name) {
 		f.flush()
 		f.block = previous
 	}
-	f.caption = previousCaption
 	if isBlockElement(n.name) && isHeaderElement(n.name) {
 		f.emit("", LineBody)
 	}

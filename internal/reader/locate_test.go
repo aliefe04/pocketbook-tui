@@ -151,3 +151,62 @@ func TestTXTHasNoEPUBLocations(t *testing.T) {
 		t.Errorf("TXT content gave an EPUB pointer")
 	}
 }
+
+// kindDocs is markup with the styled blocks that the device shows differently:
+// an in-text heading, an epigraph, a quotation with its source, a figure
+// caption, a caption with block children and an italic-only passage.
+var kindDocs = `<h1>Chapter Seven</h1>` +
+	`<p class="epigraph">Nothing is written unless it is read.</p>` +
+	`<p>Body text starts here.</p>` +
+	`<blockquote><p>Quoted words, set apart.</p><p class="attribution">— Someone Else</p></blockquote>` +
+	`<figure><figcaption>Figure 7.1 — A caption</figcaption> tail after the caption</figure>` +
+	`<p><em>An italic passage that stands alone.</em></p>` +
+	`<blockquote>Inline quotation text.</blockquote>` +
+	`<figure><figcaption><p>First caption part.</p><p>Second caption part.</p></figcaption></figure>` +
+	`<p>After the figure.</p>`
+
+func TestLineKindsFollowTheBookMarkup(t *testing.T) {
+	data := buildEPUB(t, map[string]string{"one": testXHTML("Chapter Seven", kindDocs)}, []string{"one"})
+	content, err := ParseEPUB(data)
+	if err != nil {
+		t.Fatalf("ParseEPUB: %v", err)
+	}
+	want := []struct {
+		line string
+		kind LineKind
+	}{
+		{"Chapter Seven", LineBody}, // the document title, shown as chapter chrome
+		{"Chapter Seven", LineHeading},
+		{"", LineBody},
+		{"Nothing is written unless it is read.", LineEpigraph},
+		{"Body text starts here.", LineBody},
+		{"Quoted words, set apart.", LineQuote},
+		{"— Someone Else", LineAttribution},
+		{"Figure 7.1 — A caption tail after the caption", LineCaption},
+		{"An italic passage that stands alone.", LineEpigraph},
+		{"Inline quotation text.", LineQuote},
+		{"First caption part.", LineCaption},
+		{"Second caption part.", LineCaption},
+		{"After the figure.", LineBody},
+	}
+	chapter := content.Chapters[0]
+	if len(chapter.Lines) != len(want) {
+		t.Fatalf("chapter has %d lines, want %d: %q", len(chapter.Lines), len(want), chapter.Lines)
+	}
+	for i, w := range want {
+		if got := chapter.Lines[i]; got != w.line {
+			t.Errorf("line %d = %q, want %q", i, got, w.line)
+		}
+		if got := chapter.KindAt(i); got != w.kind {
+			t.Errorf("line %d kind = %d, want %d (%q)", i, got, w.kind, w.line)
+		}
+	}
+	// Kinds are decoration: a book without them, and an index past the end,
+	// still read as body text.
+	if got := chapter.KindAt(len(want)); got != LineBody {
+		t.Errorf("kind past the end = %d, want LineBody", got)
+	}
+	if got := chapter.KindAt(-1); got != LineBody {
+		t.Errorf("kind before the start = %d, want LineBody", got)
+	}
+}
