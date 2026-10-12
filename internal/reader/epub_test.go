@@ -59,7 +59,7 @@ func createTestEPUB(t *testing.T) []byte {
 
 func TestParseEPUB(t *testing.T) {
 	data := createTestEPUB(t)
-	
+
 	content, err := ParseEPUB(data)
 	if err != nil {
 		t.Fatalf("ParseEPUB failed: %v", err)
@@ -118,7 +118,7 @@ func TestHTMLToText(t *testing.T) {
 </body></html>`
 
 	lines, title := htmlToText(html)
-	
+
 	t.Logf("Title: %q", title)
 	t.Logf("Lines (%d):", len(lines))
 	for i, line := range lines {

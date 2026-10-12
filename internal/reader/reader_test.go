@@ -51,8 +51,8 @@ func makeTestContent() *BookContent {
 	return &BookContent{
 		Chapters: []Chapter{
 			{Title: "Ch1", Lines: []string{"a", "b", "c"}}, // title(3) + body(3) = 6
-			{Title: "Ch2", Lines: []string{"d", "e"}},       // title(3) + body(2) = 5
-			{Title: "Ch3", Lines: []string{"f"}},            // title(3) + body(1) = 4
+			{Title: "Ch2", Lines: []string{"d", "e"}},      // title(3) + body(2) = 5
+			{Title: "Ch3", Lines: []string{"f"}},           // title(3) + body(1) = 4
 		},
 	}
 }
@@ -117,11 +117,11 @@ func TestCalculatePercentVirtual(t *testing.T) {
 	tests := []struct {
 		ch, line, wantPct int
 	}{
-		{0, 0, 0},   // Ch1 title, 0 read
-		{0, 3, 20},  // 3/15 = 20
-		{1, 0, 40},  // 6/15 = 40
-		{2, 0, 73},  // 11/15 = 73
-		{2, 3, 93},  // 14/15 = 93
+		{0, 0, 0},  // Ch1 title, 0 read
+		{0, 3, 20}, // 3/15 = 20
+		{1, 0, 40}, // 6/15 = 40
+		{2, 0, 73}, // 11/15 = 73
+		{2, 3, 93}, // 14/15 = 93
 	}
 	for _, tt := range tests {
 		got := CalculatePercent(c, tt.ch, tt.line)
