@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/aliefe/pocketbook-tui/internal/config"
@@ -178,4 +179,115 @@ func TestCompact20x8BoundsWithMaxVerticalMarginAndRecoveryAction(t *testing.T) {
 	assertContains(t, view, "c load")
 	assertContains(t, view, "l local")
 	assertContains(t, view, "↵ read")
+}
+
+func TestBookFooterShowsPageCountAndChapterCountdown(t *testing.T) {
+	m := numberedReader()
+	p := config.DefaultPreferences()
+	p.Progress, p.ShowHeader = "book", false
+	m.applyPreferences(p)
+	page, total := m.pageCount()
+	if total < 2 {
+		t.Fatalf("page count = %d, want several pages", total)
+	}
+	view := m.View()
+	assertFits(t, view, 44, 14)
+	assertContains(t, view, fmt.Sprintf("%d / %d", page, total))
+	assertContains(t, view, "pages to next chapter")
+	if strings.Contains(ansi.Strip(view), "S:settings") {
+		t.Fatal("the book footer kept the control row")
+	}
+}
+
+func TestBookFooterCountdownTracksPagesAndChapterEnd(t *testing.T) {
+	m := numberedReader()
+	p := config.DefaultPreferences()
+	p.Progress, p.ShowHeader = "book", false
+	m.applyPreferences(p)
+	if pages, ok := m.pagesToNextChapter(); !ok || pages < 2 {
+		t.Fatalf("countdown on the first page = %d, ok=%v, want several pages", pages, ok)
+	}
+	sawOne := false
+	for {
+		pages, ok := m.pagesToNextChapter()
+		if !ok {
+			t.Fatal("countdown lost the next chapter before it started")
+		}
+		want := fmt.Sprintf("%d pages to next chapter", pages)
+		if pages == 1 {
+			want = "1 page to next chapter"
+			sawOne = true
+		}
+		assertContains(t, m.View(), want)
+		before := m.rowIndex()
+		m.pageDown()
+		if before == m.rowIndex() {
+			break
+		}
+	}
+	if !sawOne {
+		t.Fatal("the last page before the seam never reported one page")
+	}
+	m.nextChapter()
+	if m.chapterIdx != 1 {
+		t.Fatalf("next chapter left the reader in chapter %d", m.chapterIdx)
+	}
+	assertContains(t, m.View(), "End of book")
+}
+
+func TestPageWordCoverageWithBookFooter(t *testing.T) {
+	m := numberedReader()
+	p := config.DefaultPreferences()
+	p.Progress, p.ShowHeader = "book", false
+	m.applyPreferences(p)
+	var got []string
+	for range 100 {
+		view := m.View()
+		assertFits(t, view, 44, 14)
+		got = append(got, numberedWord.FindAllString(ansi.Strip(view), -1)...)
+		before := m.rowIndex()
+		m.pageDown()
+		if before == m.rowIndex() {
+			break
+		}
+	}
+	var want []string
+	for i := 1; i <= 360; i++ {
+		want = append(want, fmt.Sprintf("WORD%03d", i))
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("page turns lost or repeated words with the book footer: got %d, want 360", len(got))
+	}
+}
+
+func TestBookProgressKeepsStatusWithHiddenFooter(t *testing.T) {
+	m := numberedReader()
+	p := config.DefaultPreferences()
+	p.Progress, p.ShowFooter = "book", false
+	m.applyPreferences(p)
+	m.setStatus("Position not saved", true)
+	page, total := m.pageCount()
+	view := m.View()
+	assertFits(t, view, 44, 14)
+	assertContains(t, view, "Position not saved")
+	assertContains(t, view, "S:settings")
+	assertContains(t, view, fmt.Sprintf("%d / %d", page, total))
+}
+
+func TestBookFooterFitsCompactTerminal(t *testing.T) {
+	for _, size := range [][2]int{{20, 8}, {40, 14}} {
+		for _, header := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%dx%d-header%v", size[0], size[1], header), func(t *testing.T) {
+				m := newReaderModel(testContent(), "book-compact", "Book", nil, size[0], size[1])
+				p := config.DefaultPreferences()
+				p.Progress, p.ShowHeader = "book", header
+				m.applyPreferences(p)
+				page, total := m.pageCount()
+				view := m.View()
+				assertFits(t, view, size[0], size[1])
+				assertContains(t, view, fmt.Sprintf("%d / %d", page, total))
+				assertContains(t, view, "to next")
+			})
+		}
+	}
 }

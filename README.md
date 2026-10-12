@@ -144,7 +144,7 @@ Use `↑`/`↓` to select a setting, `←`/`→` to change it, and `tab` to reac
 |----------|----------|
 | Appearance | Auto, dark, light, or sepia theme. Blue, green, amber, purple, or rose accent |
 | Reading | Page or scroll mode. Reading width, side margins, top/bottom margins, line spacing, paragraph spacing, left alignment or justification |
-| Reading information | Header and footer visibility. Percentage, terminal page count, both, or neither. Page overlap |
+| Reading information | Header and footer visibility. Percentage, terminal page count, a two-row book footer, both, or neither. Page overlap |
 | Images | Color, grayscale, captions only, or hidden. Auto/native graphics or portable blocks. Auto height, or 4 to 60 rows |
 | Controls | Mouse wheel. Separate custom keys for next page, previous page, line down, and line up |
 | Library | Recent reading, title, or author order. Compact one-row entries |
@@ -153,6 +153,10 @@ Use `↑`/`↓` to select a setting, `←`/`→` to change it, and `tab` to reac
 For a custom key, select its setting, press `enter`, then press the new key.
 Settings reject duplicate keys and keys reserved for safe exits, Cloud recovery, and chapter navigation.
 Page overlap repeats selected rows when you turn a page.
+
+The `book` progress mode replaces the reader control row with two centred rows: the page count, for example `142 / 442`, and the pages before the next chapter, for example `15 pages to next chapter`.
+Both rows count pages of the current terminal layout, not device pages.
+The last chapter shows `End of book`. Hide the header for the closest match to the PocketBook device page.
 
 Disabling automatic Cloud checks still permits manual `C` checks.
 Disabling Cloud sync keeps reading positions on this device only, including during conflict recovery.
@@ -167,7 +171,7 @@ Change font family and font size in your terminal application.
 
 - **Formats:** The reader supports EPUB and TXT only. It rejects other formats.
 - **DRM:** The reader rejects books marked DRM or LCP.
-- **Reader output:** The reader displays text and embedded PNG, JPEG, and GIF photos. It does not reproduce fonts or the device's page layout.
+- **Reader output:** The reader displays text and embedded PNG, JPEG, and GIF photos. It styles headings, epigraphs, quotations, and figure captions like the PocketBook device. It does not reproduce fonts or the device's page layout.
 - **Page turns:** Page movement follows displayed rows, including wrapped paragraphs and chapter boundaries. It does not skip the rest of a long paragraph.
 - **Resizing:** The current source passage stays visible when the terminal width changes.
 - **Saved positions:** Local positions identify paragraphs or text boundaries. Cloud positions can identify a paragraph or an image, not a terminal-specific page boundary.

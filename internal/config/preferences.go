@@ -55,7 +55,7 @@ var (
 	Accents       = []string{"blue", "green", "amber", "purple", "rose"}
 	ReadingModes  = []string{"page", "scroll"}
 	Alignments    = []string{"left", "justify"}
-	ProgressModes = []string{"percent", "pages", "both", "none"}
+	ProgressModes = []string{"percent", "pages", "book", "both", "none"}
 	LibrarySorts  = []string{"recent", "title", "author"}
 	ImageModes    = []string{"color", "grayscale", "captions", "hidden"}
 	ImageBackends = []string{"auto", "blocks"}

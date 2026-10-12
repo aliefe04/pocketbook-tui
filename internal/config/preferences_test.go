@@ -195,6 +195,7 @@ func TestValidateRanges(t *testing.T) {
 		{"unknown accent", func(p *Preferences) { p.Accent = "teal" }, false},
 		{"unknown sort", func(p *Preferences) { p.LibrarySort = "year" }, false},
 		{"unknown progress", func(p *Preferences) { p.Progress = "chapters" }, false},
+		{"book progress", func(p *Preferences) { p.Progress = "book" }, true},
 		{"image height auto", func(p *Preferences) { p.ImageHeight = 0 }, true},
 		{"image height minimum", func(p *Preferences) { p.ImageHeight = 4 }, true},
 		{"image height maximum", func(p *Preferences) { p.ImageHeight = 60 }, true},

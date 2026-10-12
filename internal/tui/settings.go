@@ -31,7 +31,7 @@ var settingsOptions = []settingOption{
 	{category: "Reading", label: "Alignment", field: "Alignment", choices: config.Alignments},
 	{category: "Reading", label: "Header", field: "ShowHeader", boolean: true},
 	{category: "Reading", label: "Footer", field: "ShowFooter", boolean: true},
-	{category: "Reading", label: "Progress", field: "Progress", choices: config.ProgressModes, description: "Page numbers refer to this terminal layout, not device pages."},
+	{category: "Reading", label: "Progress", field: "Progress", choices: config.ProgressModes, description: "Page numbers refer to this terminal layout, not device pages. book adds a centred footer row pair: page count, then pages to the next chapter."},
 	{category: "Reading", label: "Page overlap", field: "PageOverlap", maximum: 3, step: 1, description: "Repeat this many displayed rows on the next page."},
 	{category: "Images", label: "Protocol", field: "ImageBackend", choices: config.ImageBackends, description: "Auto uses Kitty native graphics when available; blocks uses portable half-block characters."},
 	{category: "Images", label: "Photo display", field: "ImageMode", choices: config.ImageModes, description: "Portable color or grayscale blocks, captions only, or hidden. I opens the image viewer."},

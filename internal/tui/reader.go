@@ -132,16 +132,30 @@ func (m *readerModel) setRow(index int) {
 func (m *readerModel) moveRows(delta int)  { m.setRow(m.rowIndex() + delta) }
 func (m *readerModel) scrollDown(rows int) { m.moveRows(max(rows, 0)) }
 func (m *readerModel) scrollUp(rows int)   { m.moveRows(-max(rows, 0)) }
+
+// footerRows counts the rows the footer takes: the rule and one or two text
+// rows, plus the status row when a status message is shown.
+func (m *readerModel) footerRows() int {
+	if !m.prefs.ShowFooter {
+		return 0
+	}
+	rows := 2
+	if m.bookFooter() {
+		rows++
+	}
+	if m.statusMsg != "" {
+		rows++
+	}
+	return rows
+}
+
 func (m *readerModel) bodyRows() int {
 	_, h := termSize(m.width, m.height)
-	chrome := 0
+	chrome := m.footerRows()
 	if m.prefs.ShowHeader {
 		chrome += 2
 	}
-	if m.prefs.ShowFooter {
-		chrome += 2
-	}
-	if m.statusMsg != "" {
+	if m.statusMsg != "" && !m.prefs.ShowFooter {
 		chrome++
 	}
 	return max(h-chrome, 1)
@@ -171,13 +185,66 @@ func (m *readerModel) jumpChapter(direction int) {
 		return
 	}
 	for chapter := m.chapterIdx + direction; chapter >= 0 && chapter < len(m.content.Chapters); chapter += direction {
-		index := m.layout.chapterStart(chapter)
-		if index < len(m.layout.rows) && m.layout.rows[index].chapter == chapter {
+		if index, ok := m.chapterRow(chapter); ok {
 			m.setRow(index)
 			return
 		}
 	}
 }
+
+// chapterRow returns the first row of a chapter, and whether the layout holds
+// that chapter at all. A chapter with no rows is skipped by the caller.
+func (m *readerModel) chapterRow(chapter int) (int, bool) {
+	m.ensureLayout()
+	index := m.layout.chapterStart(chapter)
+	if index >= 0 && index < len(m.layout.rows) && m.layout.rows[index].chapter == chapter {
+		return index, true
+	}
+	return 0, false
+}
+
+// nextChapterRow returns the first row of the next chapter that has rows.
+func (m *readerModel) nextChapterRow() (int, bool) {
+	if m.content == nil {
+		return 0, false
+	}
+	for chapter := m.chapterIdx + 1; chapter < len(m.content.Chapters); chapter++ {
+		if index, ok := m.chapterRow(chapter); ok {
+			return index, true
+		}
+	}
+	return 0, false
+}
+
+// pagesToNextChapter counts the page turns that are left before the next
+// chapter starts, in this terminal layout. The current page counts as the
+// first turn, so a chapter that ends on the next page reports one page.
+func (m *readerModel) pagesToNextChapter() (int, bool) {
+	index, ok := m.nextChapterRow()
+	if !ok {
+		return 0, false
+	}
+	capacity := m.textCapacity()
+	remaining := index - m.rowIndex()
+	if remaining <= 0 {
+		return 1, true
+	}
+	return max((remaining+capacity-1)/capacity, 1), true
+}
+
+// chapterCountdownText names the pages before the next chapter.
+func (m *readerModel) chapterCountdownText() string {
+	pages, ok := m.pagesToNextChapter()
+	switch {
+	case !ok:
+		return "End of book"
+	case pages == 1:
+		return "1 page to next chapter"
+	default:
+		return fmt.Sprintf("%d pages to next chapter", pages)
+	}
+}
+
 func (m *readerModel) nextChapter() { m.jumpChapter(1) }
 func (m *readerModel) prevChapter() { m.jumpChapter(-1) }
 func (m *readerModel) goToChapterStart() {
@@ -412,6 +479,10 @@ func (m readerModel) View() string {
 	}
 	pct := m.progressText()
 	headerRight := pct
+	if m.bookFooter() {
+		// The book footer shows the page count on its own centred row.
+		headerRight = ""
+	}
 	if !m.prefs.ShowFooter {
 		settingsHint := "S:settings"
 		withSettings := settingsHint
@@ -463,10 +534,14 @@ func (m readerModel) View() string {
 		headers = []string{header, rule}
 	}
 	if m.prefs.ShowFooter {
+		footers = []string{rule}
 		if m.statusMsg != "" {
-			footers = []string{rule, statusRow(w, m.statusMsg, m.statusIsError), controls}
+			footers = append(footers, statusRow(w, m.statusMsg, m.statusIsError))
+		}
+		if m.bookFooter() {
+			footers = append(footers, m.bookRow(w, pct), m.bookRow(w, m.chapterCountdownText()))
 		} else {
-			footers = []string{rule, controls}
+			footers = append(footers, controls)
 		}
 	} else if m.statusMsg != "" {
 		footers = []string{statusRow(w, m.statusMsg, m.statusIsError)}
@@ -502,13 +577,37 @@ func (m readerModel) helpView() string {
 	return frame(w, h, []string{titleRow(w, "Reader help", "")}, wrapped[start:min(start+capacity, len(wrapped))], []string{truncate("↑↓ scroll · ?:back", w)})
 }
 
+// bookFooter reports whether the footer shows the two centred book rows
+// instead of the control row.
+func (m *readerModel) bookFooter() bool {
+	return m.prefs.ShowFooter && m.prefs.Progress == "book"
+}
+
+// bookRow centres one footer row of the book footer.
+func (m readerModel) bookRow(width int, text string) string {
+	text = truncate(text, width)
+	pad := max((width-lipgloss.Width(text))/2, 0)
+	return strings.Repeat(" ", pad) + readDim.Render(text)
+}
+
+// pageCount returns the current page and the page count of this terminal
+// layout.
+func (m *readerModel) pageCount() (int, int) {
+	m.ensureLayout()
+	capacity := m.textCapacity()
+	total := max((len(m.layout.rows)+capacity-1)/capacity, 1)
+	return m.rowIndex()/capacity + 1, total
+}
+
 func (m *readerModel) progressText() string {
 	percent := fmt.Sprintf("%d%%", m.percent())
-	capacity := m.textCapacity()
-	pages := fmt.Sprintf("p%d/%d", m.rowIndex()/capacity+1, max((len(m.layout.rows)+capacity-1)/capacity, 1))
+	page, total := m.pageCount()
+	pages := fmt.Sprintf("p%d/%d", page, total)
 	switch m.prefs.Progress {
 	case "pages":
 		return pages
+	case "book":
+		return fmt.Sprintf("%d / %d", page, total)
 	case "both":
 		return percent + " · " + pages
 	case "none":
