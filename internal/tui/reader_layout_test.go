@@ -7,8 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aliefe/pocketbook-tui/internal/config"
 	"github.com/aliefe/pocketbook-tui/internal/reader"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -127,5 +129,65 @@ func TestWrappedMovementIsNotAnUnchangedCloudBookmark(t *testing.T) {
 	}
 	if m.position().LineOffset != 0 {
 		t.Fatal("wrapped-row movement changed the persisted paragraph coordinate")
+	}
+}
+
+// styledReader is one chapter whose lines carry the kinds that the device
+// shows differently.
+func styledReader() readerModel {
+	return newReaderModel(&reader.BookContent{Chapters: []reader.Chapter{{
+		Title: "Chapter Seven",
+		Lines: []string{
+			"A Bold Heading", "",
+			"An epigraph line.", "— The Mirror",
+			"Body text on the page.",
+			"A quoted passage.", "— Someone Else",
+			"A caption line.",
+		},
+		Kinds: []reader.LineKind{
+			reader.LineHeading, reader.LineBody,
+			reader.LineEpigraph, reader.LineAttribution,
+			reader.LineBody,
+			reader.LineQuote, reader.LineAttribution,
+			reader.LineCaption,
+		},
+	}}}, "styled", "The Mirror", nil, 80, 24)
+}
+
+func TestReaderPlacesStyledLinesLikeTheDevice(t *testing.T) {
+	m := styledReader()
+	p := config.DefaultPreferences()
+	p.ShowHeader = false
+	m.applyPreferences(p)
+	column := m.contentWidth()
+	margin := max((80-column)/2, 0)
+	centred := func(text string) int { return margin + max((column-lipgloss.Width(text))/2, 0) }
+	rows := strings.Split(m.View(), "\n")
+	row := func(marker string) string {
+		for _, candidate := range rows {
+			if line := ansi.Strip(candidate); strings.Contains(line, marker) {
+				return line
+			}
+		}
+		t.Fatalf("row %q is not on the page", marker)
+		return ""
+	}
+	lead := func(line string) int { return len(line) - len(strings.TrimLeft(line, " ")) }
+
+	// A heading and body text stay at the margin, a quotation is indented two
+	// cells, and an epigraph, a source line and a caption are centred.
+	if got, want := lead(row("A Bold Heading")), margin; got != want {
+		t.Errorf("heading starts at %d, want the margin %d", got, want)
+	}
+	if got, want := lead(row("Body text on the page.")), margin; got != want {
+		t.Errorf("body starts at %d, want the margin %d", got, want)
+	}
+	if got, want := lead(row("A quoted passage.")), margin+2; got != want {
+		t.Errorf("quotation starts at %d, want %d", got, want)
+	}
+	for _, marker := range []string{"An epigraph line.", "— The Mirror", "— Someone Else", "A caption line."} {
+		if got, want := lead(row(marker)), centred(marker); got != want {
+			t.Errorf("%q starts at %d, want the centre %d", marker, got, want)
+		}
 	}
 }
