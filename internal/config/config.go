@@ -12,6 +12,7 @@ type Config struct {
 	Token        string    `json:"token,omitempty"`
 	RefreshToken string    `json:"refresh_token,omitempty"`
 	Provider     string    `json:"provider,omitempty"`
+	ProviderName string    `json:"provider_name,omitempty"`
 	ShopID       string    `json:"shop_id,omitempty"`
 	ExpiresAt    time.Time `json:"expires_at,omitempty"`
 }

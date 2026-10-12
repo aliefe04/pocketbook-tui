@@ -104,9 +104,10 @@ type providersMsg struct {
 }
 
 type loginSuccessMsg struct {
-	token    pocketbook_cloud_client.Token
-	provider string
-	shopID   string
+	token        pocketbook_cloud_client.Token
+	provider     string
+	providerName string
+	shopID       string
 }
 
 type loginErrMsg struct{ err error }
@@ -163,24 +164,27 @@ func (m loginModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.cached[msg.email] = msg.providers
 		}
-		if msg.email != m.pending || m.state != loginStateLoading {
-			// A prefetch result. The user is still typing, so the list waits.
-			return m, nil
+		switch {
+		case msg.email == m.pending && m.state == loginStateLoading:
+			m.pending = ""
+			if msg.err != nil {
+				m.state = loginStateError
+				m.err = msg.err
+				return m, nil
+			}
+			m.providers = msg.providers
+			m.selected = 0
+			if len(m.providers) == 0 {
+				m.state = loginStateError
+				m.err = fmt.Errorf("no providers found for this email")
+				return m, nil
+			}
+			m.state = loginStateProvider
+		case m.state == loginStateProvider && msg.email == strings.TrimSpace(m.emailInput.Value()):
+			// The provider step is already on screen, so the fresh list
+			// replaces the one that was shown at once.
+			m.applyProviders(msg.providers)
 		}
-		m.pending = ""
-		if msg.err != nil {
-			m.state = loginStateError
-			m.err = msg.err
-			return m, nil
-		}
-		m.providers = msg.providers
-		m.selected = 0
-		if len(m.providers) == 0 {
-			m.state = loginStateError
-			m.err = fmt.Errorf("no providers found for this email")
-			return m, nil
-		}
-		m.state = loginStateProvider
 		return m, nil
 
 	case emailIdleMsg:
@@ -195,6 +199,7 @@ func (m loginModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case loginSuccessMsg:
 		m.cfg.SetSession(msg.token.AccessToken, msg.token.RefreshToken, msg.token.ExpiresIn)
 		m.cfg.Provider = msg.provider
+		m.cfg.ProviderName = msg.providerName
 		m.cfg.ShopID = msg.shopID
 		if err := m.cfg.Save(); err != nil {
 			m.state = loginStateError
@@ -251,6 +256,46 @@ func tickLookup() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg { return lookupTickMsg{} })
 }
 
+// savedProvider is the provider of the last successful sign-in on this
+// machine. Showing it at once keeps the provider step off the critical path.
+func (m loginModel) savedProvider() *pocketbook_cloud_client.Provider {
+	if m.cfg == nil || m.cfg.Provider == "" || m.cfg.ShopID == "" {
+		return nil
+	}
+	name := m.cfg.ProviderName
+	if name == "" {
+		name = m.cfg.Provider
+	}
+	return &pocketbook_cloud_client.Provider{Alias: m.cfg.Provider, Name: name, ShopID: m.cfg.ShopID}
+}
+
+// applyProviders replaces the visible list with a fresh one. The selection
+// stays on the same provider while the server still offers it, and moves to
+// the first entry when the shown provider is not offered for this address.
+func (m *loginModel) applyProviders(providers []pocketbook_cloud_client.Provider) {
+	if len(providers) == 0 {
+		return
+	}
+	shown := pocketbook_cloud_client.Provider{}
+	if m.selected >= 0 && m.selected < len(m.providers) {
+		shown = m.providers[m.selected]
+	}
+	m.providers = providers
+	m.selected = 0
+	for i, p := range providers {
+		if shown.Alias != "" && p.Alias == shown.Alias && p.ShopID == shown.ShopID {
+			m.selected = i
+			return
+		}
+	}
+}
+
+// lookupInFlight reports whether the providers of the address on screen are
+// still being fetched.
+func (m loginModel) lookupInFlight() bool {
+	return m.inflight != "" && m.inflight == strings.TrimSpace(m.emailInput.Value())
+}
+
 // looksLikeEmail reports whether the text is worth sending to the provider
 // lookup.
 func looksLikeEmail(value string) bool {
@@ -266,12 +311,19 @@ func (m loginModel) handleEnter() (tea.Model, tea.Cmd) {
 		if email == "" {
 			return m, nil
 		}
-		m.pending = email
 		if providers, ok := m.cached[email]; ok {
 			// The lookup already finished while the user was typing.
 			m.providers, m.selected, m.state = providers, 0, loginStateProvider
 			return m, nil
 		}
+		if saved := m.savedProvider(); saved != nil {
+			// The server takes about ten seconds to list the providers of an
+			// address, so the provider of the last sign-in is shown at once
+			// and the list refreshes behind it.
+			m.providers, m.selected, m.state = []pocketbook_cloud_client.Provider{*saved}, 0, loginStateProvider
+			return m.startLookup(email)
+		}
+		m.pending = email
 		m.state = loginStateLoading
 		m.started = time.Now()
 		next, cmd := m.startLookup(email)
@@ -296,7 +348,7 @@ func (m loginModel) handleEnter() (tea.Model, tea.Cmd) {
 			if err != nil {
 				return loginErrMsg{err: err}
 			}
-			return loginSuccessMsg{token: token, provider: p.Alias, shopID: p.ShopID}
+			return loginSuccessMsg{token: token, provider: p.Alias, providerName: p.Name, shopID: p.ShopID}
 		}
 
 	case loginStateProvider:
@@ -352,6 +404,9 @@ func (m loginModel) stateBody(width, height, headerRows int) ([]string, []keyHin
 
 	case loginStateProvider:
 		prelude := []string{"", mutedStyle.Render(loginIndent + "Select your account provider")}
+		if m.lookupInFlight() {
+			prelude = append(prelude, mutedStyle.Render(loginIndent+"Checking available servers…"))
+		}
 		footerRows := 2
 		capacity := max(height-headerRows-len(prelude)-footerRows, 1)
 		start := scrollWindow(0, m.selected, len(m.providers), capacity)

@@ -42,6 +42,12 @@ The TUI signs in with the email and PocketBook password of your PocketBook Cloud
 
 The library opens after a successful sign-in. If sign-in fails, press `enter` to start again.
 
+The server takes about ten seconds to list the providers of an address, so the TUI works around it:
+
+- The lookup starts while you type the email, and the result is kept for that address.
+- After a sign-in, the provider of that sign-in is shown at once on the next sign-in, and the full list replaces it as soon as the server answers. The step says `Checking available servers…` while that runs.
+- Your provider is stored in `~/.config/pocketbook-tui/config.json` together with its name. The provider list itself is never stored.
+
 ## Controls
 
 ### Sign-in
