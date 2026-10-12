@@ -6,6 +6,7 @@ import "strings"
 type Chapter struct {
 	Title  string
 	Lines  []string
+	Kinds  []LineKind
 	Images []EmbeddedImage
 	// anchors gives the EPUB source of each body line. It is nil for books
 	// without an EPUB source, and for documents whose markup could not be
@@ -34,6 +35,28 @@ func (c Chapter) TitleHeight() int {
 // occupies in the reader's virtual flow: title chrome (if any) + body lines.
 func (c Chapter) RenderedLineCount() int {
 	return c.TitleHeight() + len(c.Lines)
+}
+
+// LineKind describes how one body line of a chapter is shown. Kinds never
+// change the number of lines, so saved positions and pointers stay valid.
+type LineKind uint8
+
+const (
+	LineBody        LineKind = iota // ordinary paragraph text
+	LineHeading                     // an in-text heading
+	LineQuote                       // a block quotation
+	LineAttribution                 // the source line under a quotation
+	LineCaption                     // a figure or table caption
+	LineEpigraph                    // a short passage set entirely in italics
+)
+
+// KindAt returns the kind of a body line. Lines without a recorded kind are
+// ordinary body text, which is what plain-text books have.
+func (c Chapter) KindAt(index int) LineKind {
+	if index < 0 || index >= len(c.Kinds) {
+		return LineBody
+	}
+	return c.Kinds[index]
 }
 
 // BookContent holds all chapters of a parsed book.

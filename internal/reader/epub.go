@@ -106,9 +106,10 @@ func parseEPUB(data []byte, ptr *epubPointer) (*BookContent, Bookmark, error) {
 			}
 			continue // skip problematic chapters
 		}
-		ch := Chapter{Title: xc.title, Lines: xc.lines, anchors: xc.anchors}
+		ch := Chapter{Title: xc.title, Lines: xc.lines, Kinds: xc.kinds, anchors: xc.anchors}
 		if len(ch.Lines) == 0 && len(xc.images) > 0 {
 			ch.Lines = []string{""}
+			ch.Kinds = []LineKind{LineBody}
 		}
 		ch.Images = images.chapter(xc.images, contentPath, ch.TitleHeight(), len(ch.Lines))
 		if opf.spineStep != 6 {

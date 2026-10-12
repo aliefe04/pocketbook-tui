@@ -16,6 +16,7 @@ type visualRow struct {
 	chapter, line, offset int
 	part                  int
 	title                 bool
+	kind                  reader.LineKind
 	photo                 bool
 	imageIndex            int
 	imageRow              int
@@ -123,10 +124,17 @@ func buildReaderLayout(content *reader.BookContent, width int, options flowOptio
 		}
 		for li, text := range ch.Lines {
 			l.addImages(ch, ci, ch.TitleHeight()+li, false, 0)
-			wrapped := wrapSource(text, width)
+			kind := ch.KindAt(li)
+			// A quotation is indented, so it wraps one row narrower. Wrapping
+			// here, where the indent is known, keeps one terminal row per row.
+			lineWidth := width
+			if indentsReaderLine(kind) {
+				lineWidth = max(width-2, 1)
+			}
+			wrapped := wrapSource(text, lineWidth)
 			for wi, row := range wrapped {
-				row.chapter, row.line = ci, ch.TitleHeight()+li
-				if options.justify && wi < len(wrapped)-1 {
+				row.chapter, row.line, row.kind = ci, ch.TitleHeight()+li, kind
+				if options.justify && kind == reader.LineBody && wi < len(wrapped)-1 {
 					row.text = justifyRow(row.text, width)
 				}
 				l.rows = append(l.rows, row)
@@ -145,6 +153,12 @@ func buildReaderLayout(content *reader.BookContent, width int, options flowOptio
 		}
 	}
 	return l
+}
+
+// indentsReaderLine reports whether a kind is set in from the margin, as a
+// printed book indents a quotation.
+func indentsReaderLine(kind reader.LineKind) bool {
+	return kind == reader.LineQuote || kind == reader.LineAttribution
 }
 
 func (l *readerLayout) addImages(ch reader.Chapter, chapter, line int, after bool, offset int) {

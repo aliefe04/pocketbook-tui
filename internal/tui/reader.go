@@ -373,13 +373,26 @@ func (m readerModel) View() string {
 	for i := start; i < len(m.layout.rows) && len(body) < rows; i++ {
 		r := m.layout.rows[i]
 		style := readText
-		if r.title {
+		text := m.layout.rowText(r)
+		switch {
+		case r.title:
 			style = readChapter.Align(lipgloss.Center)
 			if r.line == 1 {
 				style = readDim.Align(lipgloss.Center)
 			}
+		case r.kind == reader.LineHeading:
+			style = readHeading
+		case r.kind == reader.LineQuote:
+			style = readQuote
+			text = "  " + text
+		case r.kind == reader.LineAttribution:
+			style = readCite.Align(lipgloss.Center)
+		case r.kind == reader.LineCaption:
+			style = readCaption.Align(lipgloss.Center)
+		case r.kind == reader.LineEpigraph:
+			style = readEpigraph.Align(lipgloss.Center)
 		}
-		body = append(body, style.Width(column).Render(m.layout.rowText(r)))
+		body = append(body, style.Width(column).Render(text))
 	}
 	for len(body) < rows {
 		body = append(body, strings.Repeat(" ", column))

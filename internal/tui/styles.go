@@ -40,7 +40,12 @@ var (
 	selectedMark  = lipgloss.NewStyle().Bold(true).Foreground(colorAccent).Background(colorSelection)
 
 	// Reader chrome and body.
-	readText    = lipgloss.NewStyle().Foreground(colorReadText)
-	readDim     = lipgloss.NewStyle().Foreground(colorReadDim)
-	readChapter = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
+	readText     = lipgloss.NewStyle().Foreground(colorReadText)
+	readDim      = lipgloss.NewStyle().Foreground(colorReadDim)
+	readChapter  = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
+	readHeading  = lipgloss.NewStyle().Bold(true).Foreground(colorReadText)
+	readQuote    = lipgloss.NewStyle().Italic(true).Foreground(colorReadText)
+	readCite     = lipgloss.NewStyle().Italic(true).Foreground(colorReadDim)
+	readCaption  = lipgloss.NewStyle().Italic(true).Foreground(colorReadDim)
+	readEpigraph = lipgloss.NewStyle().Italic(true).Foreground(colorReadText)
 )

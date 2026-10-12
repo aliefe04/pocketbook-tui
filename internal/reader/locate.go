@@ -31,6 +31,7 @@ type srcNode struct {
 	kind       srcKind
 	name       string // lower-case local name of an element
 	id         string // id attribute of an element
+	class      string // class attribute of an element
 	text       string // character data of a text node
 	src, alt   string
 	imageSteps []cfiStep
@@ -45,8 +46,14 @@ func fromHTML(n *html.Node) *srcNode {
 	case html.ElementNode:
 		s := &srcNode{kind: srcElement, name: n.Data, kids: copyHTMLChildren(n)}
 		for _, a := range n.Attr {
-			if a.Key == "id" && a.Namespace == "" {
+			if a.Namespace != "" {
+				continue
+			}
+			switch a.Key {
+			case "id":
 				s.id = a.Val
+			case "class":
+				s.class = a.Val
 			}
 		}
 		return s
@@ -138,6 +145,15 @@ type flowWalk struct {
 	body     int // depth inside body elements; only body text has a location
 	flat     []cfiStep
 	ends     []int
+
+	// block is the innermost block element being walked. With the emphasis
+	// flags it decides the kind of the line that is being collected.
+	kinds    []LineKind
+	block    *srcNode
+	caption  *srcNode
+	emphasis int
+	italics  bool
+	plain    bool
 }
 
 // walkLines flattens root into body lines. For each node in watch that the walk
@@ -156,8 +172,9 @@ func walkLines(root *srcNode, watch map[*srcNode]bool, trace bool) *flowWalk {
 	return f
 }
 
-func (f *flowWalk) emit(line string) {
+func (f *flowWalk) emit(line string, kind LineKind) {
 	f.lines = append(f.lines, line)
+	f.kinds = append(f.kinds, kind)
 	if f.trace {
 		if f.hasStart {
 			f.flat = append(f.flat, f.start...)
@@ -173,7 +190,73 @@ func (f *flowWalk) flush() {
 	}
 	line := strings.TrimSpace(f.cur.String())
 	f.cur.Reset()
-	f.emit(line)
+	f.emit(line, f.pendingKind(line))
+	f.italics, f.plain = false, false
+}
+
+// pendingKind is the kind of the line being collected. A class or the block
+// element itself decides it, so the reader shows quotations, captions and
+// headings the way the book sets them. It never changes how many lines there
+// are, only how they look.
+func (f *flowWalk) pendingKind(line string) LineKind {
+	if f.caption != nil {
+		return LineCaption
+	}
+	if kind := classKind(f.block); kind != LineBody {
+		return kind
+	}
+	if f.block == nil {
+		return LineBody
+	}
+	switch f.block.name {
+	case "h1", "h2", "h3", "h4", "h5", "h6":
+		return LineHeading
+	case "figcaption", "caption":
+		return LineCaption
+	case "blockquote":
+		if isAttribution(line) {
+			return LineAttribution
+		}
+		return LineQuote
+	}
+	if f.italics && !f.plain {
+		// A passage set entirely in italics: an epigraph or a displayed quote.
+		return LineEpigraph
+	}
+	return LineBody
+}
+
+// classKind maps the class names that books commonly use for styled blocks.
+func classKind(n *srcNode) LineKind {
+	if n == nil {
+		return LineBody
+	}
+	for _, name := range strings.Fields(strings.ToLower(n.class)) {
+		switch name {
+		case "epigraph":
+			return LineEpigraph
+		case "caption", "figcaption", "figure-caption":
+			return LineCaption
+		case "quote", "blockquote", "pullquote", "pull-quote", "quotebox", "quote-box":
+			return LineQuote
+		case "attribution", "cite", "source":
+			return LineAttribution
+		case "heading", "heading1", "chapter-title", "subtitle":
+			return LineHeading
+		}
+	}
+	return LineBody
+}
+
+// isAttribution reports whether a quotation line names its source.
+func isAttribution(line string) bool {
+	line = strings.TrimSpace(line)
+	for _, dash := range []string{"—", "–", "-"} {
+		if strings.HasPrefix(line, dash) {
+			return true
+		}
+	}
+	return false
 }
 
 // children walks the children of n. A text chunk is the text between element
@@ -216,6 +299,11 @@ func (f *flowWalk) text(n *srcNode, index, before int) {
 		f.start = append(f.start, cfiStep{index: index, offset: before + utf16Len(n.text[:lead])})
 		f.hasStart = true
 	}
+	if f.emphasis > 0 {
+		f.italics = true
+	} else {
+		f.plain = true
+	}
 	f.cur.WriteString(t)
 }
 
@@ -234,12 +322,31 @@ func (f *flowWalk) element(n *srcNode) {
 	if f.watch[n] && f.body > 0 {
 		f.at[n] = len(f.lines)
 	}
+	previous := f.block
+	if isBlockElement(n.name) {
+		f.block = n
+	}
+	previousCaption := f.caption
+	if n.name == "figcaption" || n.name == "caption" {
+		f.caption = n
+	}
+	emphasis := n.name == "em" || n.name == "i"
+	if emphasis {
+		f.emphasis++
+	}
 	f.children(n)
+	if emphasis {
+		f.emphasis--
+	}
+	// The caption context is restored after the flush below, so the lines that
+	// the caption produced keep their kind.
 	if isBlockElement(n.name) {
 		f.flush()
-		if isHeaderElement(n.name) {
-			f.emit("")
-		}
+		f.block = previous
+	}
+	f.caption = previousCaption
+	if isBlockElement(n.name) && isHeaderElement(n.name) {
+		f.emit("", LineBody)
 	}
 	if isBody {
 		f.body--
@@ -329,6 +436,7 @@ func (bc *BookContent) PointerAt(chapterIdx, lineOffset int) (string, bool) {
 // xhtmlChapter is one content document read for the reader.
 type xhtmlChapter struct {
 	lines      []string
+	kinds      []LineKind
 	title      string
 	anchors    *anchorTable // nil when the XML tree gives different lines
 	line       int          // body line that the pointer names, or -1
@@ -350,7 +458,8 @@ func readXHTML(data []byte, steps []cfiStep, itemref int) xhtmlChapter {
 		return xhtmlChapter{line: -1, locateErr: fmt.Errorf("parse document: %w", err)}
 	}
 	res := xhtmlChapter{title: extractTitle(doc), line: -1}
-	res.lines = walkLines(fromHTML(doc), nil, false).lines
+	walked := walkLines(fromHTML(doc), nil, false)
+	res.lines, res.kinds = walked.lines, walked.kinds
 
 	root, err := parseXHTML(data)
 	if err != nil {
@@ -373,21 +482,21 @@ func readXHTML(data []byte, steps []cfiStep, itemref int) xhtmlChapter {
 	if target != nil {
 		watch[target] = true
 	}
-	walked := walkLines(root, watch, true)
-	if !slices.Equal(walked.lines, res.lines) {
+	traced := walkLines(root, watch, true)
+	if !slices.Equal(traced.lines, res.lines) {
 		if steps != nil {
 			res.locateErr = errors.New("pointer cannot be placed exactly in this document")
 		}
 		return res
 	}
-	res.anchors = &anchorTable{itemref: itemref, steps: walked.flat, ends: walked.ends}
+	res.anchors = &anchorTable{itemref: itemref, steps: traced.flat, ends: traced.ends}
 	for _, node := range nodes {
 		if node == target {
 			res.isImage = true
 			res.imageIndex = len(res.images)
 		}
 		pointer := (&anchorTable{itemref: itemref, steps: node.imageSteps, ends: []int{len(node.imageSteps)}}).pointer(0)
-		res.images = append(res.images, imageReference{source: node.src, alt: node.alt, line: walked.at[node], pointer: pointer})
+		res.images = append(res.images, imageReference{source: node.src, alt: node.alt, line: traced.at[node], pointer: pointer})
 	}
 
 	switch {
@@ -395,7 +504,7 @@ func readXHTML(data []byte, steps []cfiStep, itemref int) xhtmlChapter {
 	case resolveErr != nil:
 		res.locateErr = resolveErr
 	default:
-		pos, ok := walked.at[target]
+		pos, ok := traced.at[target]
 		switch {
 		case !ok:
 			res.locateErr = errors.New("pointer names content outside the readable text")
